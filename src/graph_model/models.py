@@ -142,14 +142,16 @@ class RunMetrics(BaseModel):
 
     llm_calls: int = 0
     tool_calls: int = 0
+    policy_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    policy_prompt_tokens: int = 0
     cached_steps: int = 0
     elapsed_seconds: float = 0.0
 
     @property
     def total_tokens(self) -> int:
-        return self.prompt_tokens + self.completion_tokens
+        return self.prompt_tokens + self.completion_tokens + self.policy_prompt_tokens
 
 
 class NodeResult(BaseModel):

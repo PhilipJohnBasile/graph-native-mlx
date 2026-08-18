@@ -1,25 +1,98 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import dataclass
+import math
+import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Sequence
 
 from graph_model.models import GraphSpec
 
 from .decision import MLXUnavailableError
-from .graph_tables import compile_graph
+from .graph_tables import CompiledGraphTables, compile_graph
 from .policy import GraphPolicyConfig, GraphPolicyHeads
-from .training_data import read_policy_training_data
+from .training_data import (
+    PolicyTrainingRecord,
+    dataset_identity,
+    read_policy_training_data,
+)
 
 
 @dataclass(frozen=True)
 class TrainingSummary:
     records: int
-    epochs: int
-    initial_loss: float
-    final_loss: float
+    train_records: int
+    validation_records: int
+    epochs_requested: int
+    epochs_completed: int
+    initial_train_loss: float
+    final_train_loss: float
+    best_validation_loss: float | None
+    best_epoch: int | None
+    uses_hidden_states: bool
+    hidden_feature_size: int
+    hidden_state_schema_hash: str
+    model_fingerprint: str
     weights_path: str
     config_path: str
+
+
+def policy_config_for_records(
+    *,
+    tables: CompiledGraphTables,
+    records: Sequence[PolicyTrainingRecord],
+    hidden_size: int,
+) -> GraphPolicyConfig:
+    identity = dataset_identity(list(records))
+    return GraphPolicyConfig.for_graph(
+        tables,
+        hidden_size=hidden_size,
+        backbone_feature_size=identity.hidden_feature_size,
+        hidden_state_schema_hash=identity.hidden_state_schema_hash,
+        model_fingerprint=identity.model_fingerprint,
+    )
+
+
+def split_policy_records(
+    records: Sequence[PolicyTrainingRecord],
+    *,
+    validation_fraction: float,
+    seed: int,
+) -> tuple[list[PolicyTrainingRecord], list[PolicyTrainingRecord]]:
+    """Split by run ID so decisions from one execution never cross train/validation."""
+
+    if not 0.0 <= validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be in [0, 1)")
+    items = list(records)
+    if not items or validation_fraction == 0.0:
+        return items, []
+    run_ids = sorted({record.run_id for record in items})
+    if len(run_ids) < 2:
+        return items, []
+
+    scores = {
+        run_id: int(
+            hashlib.sha256(f"{seed}:{run_id}".encode("utf-8")).hexdigest()[:16],
+            16,
+        )
+        / float(0xFFFFFFFFFFFFFFFF)
+        for run_id in run_ids
+    }
+    validation_runs = {
+        run_id for run_id, score in scores.items() if score < validation_fraction
+    }
+    if not validation_runs:
+        validation_runs = {min(run_ids, key=lambda run_id: scores[run_id])}
+    if validation_runs == set(run_ids):
+        validation_runs.remove(max(run_ids, key=lambda run_id: scores[run_id]))
+
+    train = [record for record in items if record.run_id not in validation_runs]
+    validation = [record for record in items if record.run_id in validation_runs]
+    if not train:
+        raise ValueError("validation split left no training records")
+    return train, validation
 
 
 def train_mlx_policy_file(
@@ -30,6 +103,10 @@ def train_mlx_policy_file(
     hidden_size: int = 128,
     epochs: int = 100,
     learning_rate: float = 1e-3,
+    weight_decay: float = 1e-4,
+    validation_fraction: float = 0.15,
+    patience: int = 15,
+    require_hidden: bool = False,
     seed: int = 42,
 ) -> TrainingSummary:
     if epochs < 1:
@@ -38,32 +115,73 @@ def train_mlx_policy_file(
         raise ValueError("hidden_size must be >= 8")
     if learning_rate <= 0:
         raise ValueError("learning_rate must be positive")
+    if weight_decay < 0:
+        raise ValueError("weight_decay must be non-negative")
+    if not 0.0 <= validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be in [0, 1)")
+    if patience < 1:
+        raise ValueError("patience must be >= 1")
     try:
         import mlx.core as mx
         import mlx.nn as nn
         import mlx.optimizers as optim
-    except ImportError as exc:  # pragma: no cover - executed on Apple Silicon
+    except ImportError as exc:  # pragma: no cover - Apple Silicon only
         raise MLXUnavailableError("MLX policy training requires the mlx package") from exc
 
     tables = compile_graph(graph)
-    records = read_policy_training_data(input_path, tables=tables)
-    config = GraphPolicyConfig.for_graph(tables, hidden_size=hidden_size)
+    records = read_policy_training_data(
+        input_path,
+        tables=tables,
+        require_hidden=require_hidden,
+    )
+    identity = dataset_identity(records)
+    config = policy_config_for_records(
+        tables=tables,
+        records=records,
+        hidden_size=hidden_size,
+    )
+    train_records, validation_records = split_policy_records(
+        records,
+        validation_fraction=validation_fraction,
+        seed=seed,
+    )
+
     mx.random.seed(seed)
     model = GraphPolicyHeads(config)
-    optimizer = optim.AdamW(learning_rate=learning_rate)
+    optimizer = optim.AdamW(
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+    )
 
-    features = mx.array([list(record.features) for record in records], dtype=mx.float32)
-    route_labels = mx.array([record.route_label for record in records], dtype=mx.int32)
-    edge_labels = mx.array([record.edge_label for record in records], dtype=mx.int32)
-    stop_labels = mx.array([record.stop_label for record in records], dtype=mx.int32)
-    edge_masks = mx.array(
-        [list(record.allowed_edge_mask) for record in records], dtype=mx.bool_
-    )
-    stop_masks = mx.array(
-        [list(record.allowed_stop_mask) for record in records], dtype=mx.bool_
-    )
-    rewards = mx.array([record.reward for record in records], dtype=mx.float32)
-    costs = mx.array([list(record.cost_target) for record in records], dtype=mx.float32)
+    def arrays_for(rows: Sequence[PolicyTrainingRecord]):
+        explicit = mx.array([list(record.features) for record in rows], dtype=mx.float32)
+        if identity.uses_hidden_states:
+            backbone = mx.array(
+                [list(record.hidden_features) for record in rows],
+                dtype=mx.float32,
+            )
+        else:
+            backbone = mx.zeros((len(rows), 0), dtype=mx.float32)
+        return (
+            explicit,
+            backbone,
+            mx.array([record.route_label for record in rows], dtype=mx.int32),
+            mx.array([record.edge_label for record in rows], dtype=mx.int32),
+            mx.array([record.stop_label for record in rows], dtype=mx.int32),
+            mx.array(
+                [list(record.allowed_edge_mask) for record in rows],
+                dtype=mx.bool_,
+            ),
+            mx.array(
+                [list(record.allowed_stop_mask) for record in rows],
+                dtype=mx.bool_,
+            ),
+            mx.array([record.reward for record in rows], dtype=mx.float32),
+            mx.array([list(record.cost_target) for record in rows], dtype=mx.float32),
+        )
+
+    train_arrays = arrays_for(train_records)
+    validation_arrays = arrays_for(validation_records) if validation_records else None
 
     def masked_cross_entropy(logits, labels):
         valid = labels >= 0
@@ -72,8 +190,22 @@ def train_mlx_policy_file(
         valid_float = valid.astype(mx.float32)
         return (losses * valid_float).sum() / mx.maximum(valid_float.sum(), 1.0)
 
-    def loss_fn(model, x, route_y, edge_y, stop_y, edge_allowed, stop_allowed, reward_y, cost_y):
-        route_logits, edge_logits, stop_logits, value, cost = model(x)
+    def loss_fn(
+        model,
+        explicit,
+        backbone,
+        route_y,
+        edge_y,
+        stop_y,
+        edge_allowed,
+        stop_allowed,
+        reward_y,
+        cost_y,
+    ):
+        route_logits, edge_logits, stop_logits, value, cost = model(
+            explicit,
+            backbone if identity.uses_hidden_states else None,
+        )
         masked_edge_logits = mx.where(
             edge_allowed,
             edge_logits,
@@ -94,43 +226,99 @@ def train_mlx_policy_file(
         return route_loss + edge_loss + stop_loss + 0.5 * value_loss + 0.25 * cost_loss
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
-    initial_loss = 0.0
-    final_loss = 0.0
-    for epoch in range(epochs):
-        loss, gradients = loss_and_grad(
-            model,
-            features,
-            route_labels,
-            edge_labels,
-            stop_labels,
-            edge_masks,
-            stop_masks,
-            rewards,
-            costs,
-        )
-        optimizer.update(model, gradients)
-        mx.eval(loss, model.parameters(), optimizer.state)
-        value = float(loss.item())
-        if epoch == 0:
-            initial_loss = value
-        final_loss = value
-
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    weights_path = output / "graph_policy.safetensors"
+    best_weights = output / ".graph_policy.best.safetensors"
+    final_weights = output / "graph_policy.safetensors"
     config_path = output / "graph_policy.json"
-    model.save_weights(str(weights_path))
+
+    initial_train_loss = 0.0
+    final_train_loss = 0.0
+    best_validation_loss = math.inf
+    stale_epochs = 0
+    epochs_completed = 0
+    best_epoch: int | None = None
+
+    for epoch in range(epochs):
+        loss, gradients = loss_and_grad(model, *train_arrays)
+        optimizer.update(model, gradients)
+        mx.eval(loss, model.parameters(), optimizer.state)
+        train_loss = float(loss.item())
+        if not math.isfinite(train_loss):
+            raise ValueError("policy training loss became non-finite")
+        if epoch == 0:
+            initial_train_loss = train_loss
+        final_train_loss = train_loss
+        epochs_completed = epoch + 1
+
+        if validation_arrays is None:
+            continue
+        validation_loss_array = loss_fn(model, *validation_arrays)
+        mx.eval(validation_loss_array)
+        validation_loss = float(validation_loss_array.item())
+        if not math.isfinite(validation_loss):
+            raise ValueError("policy validation loss became non-finite")
+        if validation_loss + 1e-7 < best_validation_loss:
+            best_validation_loss = validation_loss
+            best_epoch = epoch + 1
+            stale_epochs = 0
+            model.save_weights(str(best_weights))
+        else:
+            stale_epochs += 1
+            if stale_epochs >= patience:
+                break
+
+    if validation_arrays is not None:
+        if not best_weights.exists():
+            model.save_weights(str(best_weights))
+            validation_loss_array = loss_fn(model, *validation_arrays)
+            mx.eval(validation_loss_array)
+            best_validation_loss = float(validation_loss_array.item())
+            best_epoch = epochs_completed
+        os.replace(best_weights, final_weights)
+        model.load_weights(str(final_weights), strict=True)
+    else:
+        model.save_weights(str(final_weights))
+        best_validation_loss = math.inf
+
+    # Report the losses for the weights that are actually deployed. With early
+    # stopping this is the restored best-validation checkpoint, not the final
+    # optimization step that happened to run.
+    mx.eval(model.parameters())
+    deployed_train_loss = loss_fn(model, *train_arrays)
+    mx.eval(deployed_train_loss)
+    final_train_loss = float(deployed_train_loss.item())
+    if not math.isfinite(final_train_loss):
+        raise ValueError("deployed policy training loss is non-finite")
+    if validation_arrays is not None:
+        deployed_validation_loss = loss_fn(model, *validation_arrays)
+        mx.eval(deployed_validation_loss)
+        best_validation_loss = float(deployed_validation_loss.item())
+        if not math.isfinite(best_validation_loss):
+            raise ValueError("deployed policy validation loss is non-finite")
+
     config.save(config_path)
     summary = TrainingSummary(
         records=len(records),
-        epochs=epochs,
-        initial_loss=initial_loss,
-        final_loss=final_loss,
-        weights_path=str(weights_path.resolve()),
+        train_records=len(train_records),
+        validation_records=len(validation_records),
+        epochs_requested=epochs,
+        epochs_completed=epochs_completed,
+        initial_train_loss=initial_train_loss,
+        final_train_loss=final_train_loss,
+        best_validation_loss=(
+            None if not validation_records else float(best_validation_loss)
+        ),
+        best_epoch=best_epoch,
+        uses_hidden_states=identity.uses_hidden_states,
+        hidden_feature_size=identity.hidden_feature_size,
+        hidden_state_schema_hash=identity.hidden_state_schema_hash,
+        model_fingerprint=identity.model_fingerprint,
+        weights_path=str(final_weights.resolve()),
         config_path=str(config_path.resolve()),
     )
     (output / "training_summary.json").write_text(
-        json.dumps(summary.__dict__, indent=2, sort_keys=True),
+        json.dumps(asdict(summary), indent=2, sort_keys=True, allow_nan=False),
         encoding="utf-8",
     )
     return summary

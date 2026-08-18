@@ -1,61 +1,71 @@
 # Graph-Native MLX Model
 
-A graph-controlled coding-agent runtime for Apple Silicon. It combines a resident MLX-LM backbone with a validated workflow graph, hard transition masks, durable checkpoints, isolated Git worktrees, transactional patch application, and real test execution.
+A graph-controlled coding-agent runtime for Apple Silicon. It combines a resident MLX-LM language backbone with a validated workflow graph, hard transition masks, state-aware Qwen hidden representations, durable checkpoints, isolated Git worktrees, transactional patch application, and real test execution.
 
 The central rule is:
 
 > The graph is the control plane. A loop is only a named, bounded, observable back-edge.
 
-This is a compound model rather than a new foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, side effects, verification order, budgets, retries, termination, and recovery.
+This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, side effects, verification order, budgets, retries, termination, and recovery.
 
-## v0.3 capabilities
+## v0.4 capabilities
 
-- Direct in-process `mlx_lm` generation with one resident model/tokenizer
+- Direct in-process `mlx_lm` generation with one resident model and tokenizer
+- One dedicated affinity worker for model load, generation, hidden-state extraction, and policy inference
 - A compiled 12-node, 19-edge coding supergraph
 - MLX-native masked route, edge, and stop decisions
-- Optional trainable route/edge/stop/value/cost policy heads
+- Optional route/edge/stop/value/cost policy heads
+- Qwen hidden-state extraction from the current checkpointed graph state
+- Configurable selected layers: `final`, integer indices, negative indices, and percentages
+- `last-token`, `mean`, or `mean-last` pooling
+- Stable fixed-size CountSketch projection, 256 dimensions by default
+- Gated residual fusion of 62 explicit graph features with projected Qwen features
+- Hash-addressed projected-feature artifacts; raw prompts and raw hidden tensors are not persisted
+- Durable accounting for policy calls, hidden-state prefill tokens, and transition latency
+- Model, extractor-schema, graph-schema, config, and weight identity checks
 - Real Git repository inspection and bounded context selection
 - Detached per-run worktrees by default; the source checkout remains untouched
 - A dedicated patch-application node separate from model generation
-- Strict unified-diff validation and sensitive-path blocking
+- Strict unified-diff validation, sensitive-path blocking, and transactional rollback
 - Idempotent patch ledgers with interruption recovery
-- Transactional rollback if post-application validation fails
 - Real verifier commands with no shell, executable allowlists, timeouts, and output limits
 - Workspace fingerprints before and after tests to reject test-induced source mutation
 - Independent semantic review after deterministic verification
 - Two bounded local repair passes; no unbounded “try again” loop
 - SQLite checkpoints, append-only traces, and same-run cross-process exclusion
-- Active-time budgets that do not expire merely because a run was paused
+- Active-time budgets that do not expire while a run is paused
+- JSONL repository-task trace collection
+- Hidden-feature-required policy export and run-level train/validation splitting
 - Hash-verified patch promotion to a clean source checkout
-- Worktree cleanup without deleting patches or audit artifacts
 - Optional Restate durable-execution adapter
-- Policy-trace export and MLX sidecar training
 
 ## Authority boundary
 
 ```text
-                         MLX language backbone
-                 plan / patch / diagnose / repair / review
-                                  │
-                                  ▼
-                         typed JSON node result
-                                  │
-                                  ▼
-                  validated graph + runtime predicates
-                                  │
-                    optional learned residual logits
-                                  │
-                                  ▼
-                      hard MLX transition mask
-                                  │
-                                  ▼
-                      selected valid graph edge
-                                  │
-                                  ▼
+             current task + checkpointed graph state + verifier evidence
+                                      │
+                                      ▼
+                              Qwen MLX backbone
+                                      │
+                   selected hidden views, pooled and projected
+                                      │
+                                      ▼
+62 explicit graph features ─► gated policy fusion ─► residual logits/value/cost
+                                      │
+                                      ▼
+                  validated graph + runtime predicates + traversal caps
+                                      │
+                                      ▼
+                         hard MLX transition mask
+                                      │
+                                      ▼
+                       selected valid graph edge
+                                      │
+                                      ▼
           durable host runtime: Git, tests, checkpoints, permissions
 ```
 
-A learned policy may rank currently valid choices. It cannot add a node, invent an edge, bypass the apply/test/review gates, exceed traversal caps, or grant itself more repair attempts.
+A learned policy may rank currently valid choices. It cannot add a node, invent an edge, bypass the apply/test/review gates, exceed traversal caps, grant itself more repair attempts, or commit an external effect.
 
 ## Default repository graph
 
@@ -95,8 +105,8 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.3.0.zip
-cd graph-native-model-mlx-v0.3.0
+unzip graph-native-model-mlx-v0.4.0.zip
+cd graph-native-model-mlx-v0.4.0
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -108,11 +118,13 @@ pytest
 
 The base package and portable tests work on non-MLX systems. The `mlx` extra installs only on Apple Silicon.
 
-## Configure Qwen through MLX-LM
+## Configure the MLX model
 
 ```bash
-export GRAPH_MODEL_MLX_MODEL='AutomatosX/AX-Qwen3.8-27B-MLX-AXQ-6bit-MTP'
-export GRAPH_MODEL_MLX_REVISION='<hugging-face-commit-sha>'
+export GRAPH_MODEL_MLX_MODEL='/absolute/path/to/an-MLX-LM-model'
+# For a Hub repository, pin the immutable revision:
+export GRAPH_MODEL_MLX_REVISION='<full-commit-sha>'
+
 export GRAPH_MODEL_MLX_MAX_TOKENS=8192
 export GRAPH_MODEL_MLX_TEMPERATURE=0.1
 export GRAPH_MODEL_MLX_TOP_P=1.0
@@ -120,7 +132,20 @@ export GRAPH_MODEL_MLX_MIN_P=0.0
 export GRAPH_MODEL_MLX_TOP_K=0
 ```
 
-Pinning the Hub revision is strongly recommended. The repository ID alone does not cryptographically identify the model bytes.
+Enable state-aware hidden capture:
+
+```bash
+export GRAPH_MODEL_MLX_CAPTURE_HIDDEN=1
+export GRAPH_MODEL_MLX_HIDDEN_ROOT="$PWD/.graph-model/hidden-states"
+export GRAPH_MODEL_MLX_HIDDEN_FEATURE_SIZE=256
+export GRAPH_MODEL_MLX_HIDDEN_MAX_INPUT_TOKENS=2048
+export GRAPH_MODEL_MLX_HIDDEN_CACHE_ENTRIES=1024
+export GRAPH_MODEL_MLX_POLICY_LAYERS='25%,50%,75%,final'
+export GRAPH_MODEL_MLX_POLICY_POOLING='last-token'
+export GRAPH_MODEL_MLX_HIDDEN_PROJECTION_SEED=47261993
+```
+
+Using only `final` is the least expensive capture path. Multiple selected layers produce richer policy features but require a manual no-cache decoder pass and additional memory traffic.
 
 Check the environment before a real run:
 
@@ -130,7 +155,7 @@ graph-model mlx-doctor
 graph-model mlx-doctor --load-model
 ```
 
-`--load-model` is the hardware gate for the exact MLX-LM version, model architecture, revision, quantization, adapter, and available Mac memory.
+`--load-model` is the hardware gate for the exact MLX-LM version, model architecture, revision, quantization, adapter, hidden-state path, and available Mac memory.
 
 ## Run against a real repository
 
@@ -141,10 +166,10 @@ graph-model run \
   --provider mlx \
   --run-id fix-auth-regression-001 \
   --repo /Users/pjb/git/my-project \
-  --task 'Fix the failing authentication regression. Preserve the public API, add or update focused tests, run verification, and report exact evidence.'
+  --task 'Fix the failing authentication regression. Preserve the public API, add focused tests, run verification, and report exact evidence.'
 ```
 
-The runtime automatically prepends `git diff --check` and detects common test commands. Explicit commands can be supplied in order:
+Explicit verifier commands can be supplied in order:
 
 ```bash
 graph-model run \
@@ -158,58 +183,94 @@ graph-model run \
 
 Commands are parsed with `shlex`, executed without a shell, resolved through a sanitized `PATH`, restricted to an allowlist, bounded by time and output limits, and stopped on the first failure.
 
-### Important execution boundary
+### Execution boundary
 
-Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, and output are constrained, but v0.3 is **not a hostile-code sandbox**. Use only repositories and test commands you trust.
+Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, and output are constrained, but v0.4 is not a hostile-code sandbox. Use only repositories and test commands you trust.
 
-## Inspect, promote, and clean up
-
-Inspect the full durable trace:
+## Inspect, promote, clean up, and resume
 
 ```bash
 graph-model trace --run-id fix-auth-regression-001
-```
 
-A successful worktree run exports a cumulative `verified.patch`. Apply it to the original checkout only after review:
-
-```bash
 graph-model apply-result --run-id fix-auth-regression-001
-```
 
-Promotion requires:
-
-- a completed run
-- the original source `HEAD` still matching the pinned base commit
-- a clean source checkout
-- the patch file matching its recorded SHA-256
-- the same path and patch policy used during the run
-
-Remove the detached worktree while retaining the database, trace, patch, and operation ledgers:
-
-```bash
 graph-model cleanup --run-id fix-auth-regression-001
 ```
 
-A running or unexported dirty worktree requires an explicit `--force`.
+Promotion requires a completed run, a clean source checkout still at the pinned base commit, and a verified patch whose SHA-256 matches the trace.
 
-## Resume after interruption
+Interrupted runs resume from the next unfinished checkpoint:
 
 ```bash
-graph-model run \
-  --provider mlx \
-  --run-id checkpoint-demo \
-  --repo /Users/pjb/git/my-project \
-  --stop-after-steps 4 \
-  --task 'Implement the requested feature and verify it.'
-
 graph-model resume \
   --provider mlx \
-  --run-id checkpoint-demo
+  --run-id fix-auth-regression-001
 ```
 
-Resume requires the same graph version, model/provider identity, controller identity, policy configuration, and policy-file fingerprints. A completed patch operation is replayed from its ledger rather than applied twice.
+Resume requires the same graph version, provider identity, controller identity, policy configuration, and policy-file fingerprints.
 
-Only one process may execute a given local `run_id` at a time. The POSIX file lease is released automatically if the process crashes.
+## Collect state-aware policy traces
+
+Create a JSONL manifest. Each line contains one repository task:
+
+```json
+{"run_id":"project-fix-001","repo":"/Users/pjb/git/project","task":"Fix the failing parser regression and verify it.","test_commands":["python3 -m pytest -q"],"tags":["parser","repair"]}
+```
+
+Run the manifest with hidden capture enabled:
+
+```bash
+graph-model collect-traces \
+  --provider mlx \
+  --manifest examples/repository_trace_tasks.example.jsonl \
+  --db .graph-model/traces.sqlite3 \
+  --workspace-home .graph-model/worktrees \
+  --artifact-root .graph-model/artifacts \
+  --output .graph-model/trace-summary.json
+```
+
+The collector records per-run status, graph path, generation and policy-prefill token costs, policy/tool calls, and the count of distinct hidden artifacts. Existing completed runs are summarized rather than re-executed; resumable runs require `--resume-existing`.
+
+## Export and train the fused policy
+
+Export only records that have hash-verified Qwen features:
+
+```bash
+graph-model export-mlx-policy \
+  --db .graph-model/traces.sqlite3 \
+  --success-only \
+  --require-hidden \
+  --output data/mlx-policy-hidden.jsonl
+```
+
+Train the gated route/edge/stop/value/cost sidecar:
+
+```bash
+graph-model train-mlx-policy \
+  --input data/mlx-policy-hidden.jsonl \
+  --output-dir models/graph-policy-v2 \
+  --hidden-size 128 \
+  --epochs 100 \
+  --learning-rate 0.001 \
+  --weight-decay 0.0001 \
+  --validation-fraction 0.15 \
+  --patience 15 \
+  --require-hidden
+```
+
+The train/validation split is by `run_id`, preventing decisions from one execution from leaking across both partitions. Every hidden-feature dataset must be homogeneous in projected dimension, extractor schema, and model fingerprint.
+
+Activate trained weights:
+
+```bash
+export GRAPH_MODEL_MLX_POLICY_WEIGHTS="$PWD/models/graph-policy-v2/graph_policy.safetensors"
+export GRAPH_MODEL_MLX_POLICY_CONFIG="$PWD/models/graph-policy-v2/graph_policy.json"
+export GRAPH_MODEL_MLX_POLICY_SCALE=1.0
+```
+
+A hidden-fusion sidecar refuses to load or execute against a different graph schema, Qwen model fingerprint, hidden extractor schema, or feature dimension.
+
+Behavioral cloning is only the bootstrap. Stronger policies should use held-out evaluator scores, failed alternatives, graph-search winners, and cost-aware preference data rather than treating every successful run as equally good.
 
 ## Repository safety controls
 
@@ -228,66 +289,9 @@ The default repository boundary rejects:
 
 The source checkout is never auto-promoted. Promotion is a separate CLI action.
 
-## Graph and policy compilation
-
-Regenerate immutable graph constants after intentional YAML edits:
-
-```bash
-graph-model compile-graph \
-  --graph src/graph_model/graphs/coding_supergraph.yaml \
-  --output src/graph_model/mlx_native/generated_coding_graph.py
-```
-
-The generated module includes stable node/edge IDs, adjacency masks, traversal limits, predicates, terminal masks, and a deterministic schema hash. A stale generated module fails validation.
-
-The optional policy sidecar emits:
-
-```text
-route logits:  fast / deep / repair
-edge logits:   one per compiled edge
-stop logits:   continue / repair / finish / abort
-value:         estimated completion probability
-cost:          normalized token / latency / tool-call estimates
-```
-
-It currently receives 62 explicit features for the default graph:
-
-```text
-16 task features
-34 execution and repository-state features
-12 one-hot node features
-```
-
-Activate trained policy weights:
-
-```bash
-export GRAPH_MODEL_MLX_POLICY_WEIGHTS="$PWD/models/graph-policy-v1/graph_policy.safetensors"
-export GRAPH_MODEL_MLX_POLICY_CONFIG="$PWD/models/graph-policy-v1/graph_policy.json"
-export GRAPH_MODEL_MLX_POLICY_SCALE=1.0
-```
-
-## Train the graph policy
-
-Collect real traces, preferably with held-out evaluation and human review:
-
-```bash
-graph-model export-mlx-policy \
-  --success-only \
-  --output data/mlx-policy-success.jsonl
-
-graph-model train-mlx-policy \
-  --input data/mlx-policy-success.jsonl \
-  --output-dir models/graph-policy-v1 \
-  --hidden-size 128 \
-  --epochs 100 \
-  --learning-rate 0.001
-```
-
-Behavioral cloning is only the bootstrap. To outperform the initial graph, train on selected graph-search winners, preference pairs, independent evaluator scores, and cost-normalized outcomes—not every successful trace indiscriminately.
-
 ## What remains outside MLX
 
-MLX owns model inference and policy tensor decisions. The host runtime must continue to own:
+MLX owns model inference, hidden-state extraction, feature fusion, and policy tensor decisions. The host runtime continues to own:
 
 - filesystem and Git mutation
 - process execution
@@ -298,15 +302,16 @@ MLX owns model inference and policy tensor decisions. The host runtime must cont
 - human approval
 - final transition authority
 
-Moving these responsibilities into a tensor graph would weaken, not strengthen, durability and safety.
+Moving these responsibilities into a tensor graph would weaken durability and safety.
 
 ## Current limitations
 
-- The policy sidecar uses explicit features rather than Qwen hidden-state fusion.
-- No joint text-plus-policy LoRA objective is included yet.
+- The selected hidden-state forward path must still be validated against the exact target Qwen/MLX-LM checkpoint on Apple Silicon.
+- Joint language-model plus graph-policy LoRA training is not included yet.
 - MTP/speculative decoding is deliberately not wired into control decisions.
+- Multi-layer hidden capture is not supported with MLX-LM pipeline parallelism; use `final` in that configuration.
 - Verifier execution is bounded but not OS-sandboxed.
 - Patch proposals are text-only unified diffs; binary, rename, symlink, and submodule edits are blocked.
-- The included portable environment cannot execute Apple Metal, so the selected 27B model must still pass `mlx-doctor --load-model` on the M5 Max.
+- Offline graph search and validated inference-time subgraph grafting remain future work.
 
-See [REPOSITORY_AGENT.md](REPOSITORY_AGENT.md), [ARCHITECTURE.md](ARCHITECTURE.md), [MLX_NATIVE.md](MLX_NATIVE.md), and [VALIDATION.md](VALIDATION.md) for implementation details.
+See [REPOSITORY_AGENT.md](REPOSITORY_AGENT.md), [ARCHITECTURE.md](ARCHITECTURE.md), [MLX_NATIVE.md](MLX_NATIVE.md), and [VALIDATION.md](VALIDATION.md).

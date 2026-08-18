@@ -1,0 +1,2 @@
+{"run_id":"project-parser-001","repo":"/absolute/path/to/project","task":"Fix the failing parser regression with the smallest appropriate patch, add focused coverage, and report exact verification evidence.","test_commands":["python3 -m pytest -q"],"tags":["parser","repair"]}
+{"repo":"/absolute/path/to/another-project","task":"Implement the requested typed API change, preserve compatibility, run the configured verifier suite, and report exact evidence.","test_commands":["python3 -m pytest -q","python3 -m mypy src"],"tags":["api","deep-route"]}

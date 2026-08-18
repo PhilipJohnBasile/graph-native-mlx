@@ -53,6 +53,64 @@ def _condition_context(state: RunState) -> dict[str, Any]:
     }
 
 
+def _policy_metrics_from_decision(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    metrics = value.get("policy_metrics")
+    if not isinstance(metrics, dict) or not metrics.get("graph_schema_hash"):
+        return None
+    return metrics
+
+
+def _step_policy_usage(
+    result: NodeResult,
+    transition_payload: dict[str, Any],
+) -> tuple[int, int]:
+    """Return policy contexts and newly-computed hidden-prefill tokens for one step.
+
+    Route and transition decisions are distinct policy contexts. Stop and edge ranking share one
+    transition context, so their duplicated trace metadata is counted once. Hidden artifacts are
+    also de-duplicated by digest, and an in-memory cache hit contributes no new prefill work.
+    """
+
+    contexts: list[list[dict[str, Any]]] = []
+    router = result.delta.get("router") if isinstance(result.delta, dict) else None
+    router_metrics = _policy_metrics_from_decision(router)
+    if router_metrics is not None:
+        contexts.append([router_metrics])
+
+    transition_metrics = [
+        metrics
+        for metrics in (
+            _policy_metrics_from_decision(transition_payload.get("stop_decision")),
+            _policy_metrics_from_decision(transition_payload.get("edge_decision")),
+        )
+        if metrics is not None
+    ]
+    if transition_metrics:
+        contexts.append(transition_metrics)
+
+    prompt_tokens = 0
+    seen_hidden: set[str] = set()
+    for context in contexts:
+        for metrics in context:
+            hidden = metrics.get("hidden_state")
+            if not isinstance(hidden, dict):
+                continue
+            digest = hidden.get("sha256")
+            if not isinstance(digest, str) or not digest or digest in seen_hidden:
+                continue
+            seen_hidden.add(digest)
+            if bool(metrics.get("hidden_state_cache_hit", False)):
+                continue
+            try:
+                tokens = int(hidden.get("prompt_tokens", 0))
+            except (TypeError, ValueError):
+                tokens = 0
+            prompt_tokens += max(0, tokens)
+    return len(contexts), prompt_tokens
+
+
 def valid_outgoing_edges(graph: GraphSpec, state: RunState, node_id: str) -> list[EdgeSpec]:
     """Return only graph-valid, condition-matching, non-exhausted outgoing edges.
 
@@ -338,6 +396,7 @@ class GraphRuntime:
                 transition_payload["edge_decision"] = edge_decision.as_dict()
                 return edge_decision.edge
 
+            operator_duration = time.monotonic() - step_started
             next_node = apply_node_result(
                 graph=self.graph,
                 state=state,
@@ -345,9 +404,21 @@ class GraphRuntime:
                 node_kind=node.kind,
                 result=result,
                 cached=cached,
-                duration_seconds=time.monotonic() - step_started,
+                duration_seconds=operator_duration,
                 edge_selector=controller_edge_selector,
             )
+            # apply_node_result invokes the transition controller after recording the operator
+            # duration. Add that policy latency before checkpointing so active-runtime budgets and
+            # training cost targets include hidden-state forwards and policy-head evaluation.
+            total_step_duration = time.monotonic() - step_started
+            state.metrics.elapsed_seconds += max(0.0, total_step_duration - operator_duration)
+            state.updated_at = time.time()
+            policy_calls, policy_prompt_tokens = _step_policy_usage(
+                result,
+                transition_payload,
+            )
+            state.metrics.policy_calls += policy_calls
+            state.metrics.policy_prompt_tokens += policy_prompt_tokens
             self.store.commit_step(
                 state=state,
                 node_id=previous_node,
