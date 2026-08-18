@@ -1,0 +1,4 @@
+{"id":"fast-change","task":"quick fix: rename one variable","expected_status":"completed"}
+{"id":"planned-change","task":"design and implement a production migration with tests","expected_status":"completed"}
+{"id":"recoverable-failure","task":"fix failing CI [force-fail-once]","expected_status":"completed"}
+{"id":"bounded-failure","task":"fix broken regression [force-fail-always]","expected_status":"failed"}

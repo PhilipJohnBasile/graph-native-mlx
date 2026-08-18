@@ -1,0 +1,254 @@
+{
+  "cases": [
+    {
+      "expected_status": "completed",
+      "graph": {
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 48,
+          "elapsed_seconds": 0.017999887466430664,
+          "llm_calls": 2,
+          "prompt_tokens": 148,
+          "tool_calls": 2,
+          "total_tokens": 196
+        },
+        "path": [
+          "intake",
+          "context",
+          "implement",
+          "tests",
+          "review",
+          "finish"
+        ],
+        "status": "completed"
+      },
+      "id": "fast-change",
+      "loop": {
+        "attempts": 1,
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 72,
+          "elapsed_seconds": 0.0004394054412841797,
+          "llm_calls": 3,
+          "prompt_tokens": 205,
+          "tool_calls": 2,
+          "total_tokens": 277
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "implement",
+          "tests",
+          "review",
+          "finish"
+        ],
+        "status": "completed"
+      },
+      "task": "quick fix: rename one variable"
+    },
+    {
+      "expected_status": "completed",
+      "graph": {
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 72,
+          "elapsed_seconds": 0.03620171546936035,
+          "llm_calls": 3,
+          "prompt_tokens": 249,
+          "tool_calls": 3,
+          "total_tokens": 321
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "plan_check",
+          "implement",
+          "tests",
+          "review",
+          "finish"
+        ],
+        "status": "completed"
+      },
+      "id": "planned-change",
+      "loop": {
+        "attempts": 1,
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 72,
+          "elapsed_seconds": 0.0004677772521972656,
+          "llm_calls": 3,
+          "prompt_tokens": 235,
+          "tool_calls": 2,
+          "total_tokens": 307
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "implement",
+          "tests",
+          "review",
+          "finish"
+        ],
+        "status": "completed"
+      },
+      "task": "design and implement a production migration with tests"
+    },
+    {
+      "expected_status": "completed",
+      "graph": {
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 72,
+          "elapsed_seconds": 0.018419265747070312,
+          "llm_calls": 3,
+          "prompt_tokens": 305,
+          "tool_calls": 6,
+          "total_tokens": 377
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "plan_check",
+          "implement",
+          "tests",
+          "diagnose",
+          "repair",
+          "tests",
+          "review",
+          "finish"
+        ],
+        "status": "completed"
+      },
+      "id": "recoverable-failure",
+      "loop": {
+        "attempts": 2,
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 120,
+          "elapsed_seconds": 0.0006315708160400391,
+          "llm_calls": 5,
+          "prompt_tokens": 411,
+          "tool_calls": 4,
+          "total_tokens": 531
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "implement",
+          "tests",
+          "diagnose",
+          "plan",
+          "implement",
+          "tests",
+          "review",
+          "finish"
+        ],
+        "status": "completed"
+      },
+      "task": "fix failing CI [force-fail-once]"
+    },
+    {
+      "expected_status": "failed",
+      "graph": {
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 48,
+          "elapsed_seconds": 0.03124523162841797,
+          "llm_calls": 2,
+          "prompt_tokens": 153,
+          "tool_calls": 9,
+          "total_tokens": 201
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "plan_check",
+          "implement",
+          "tests",
+          "diagnose",
+          "repair",
+          "tests",
+          "diagnose",
+          "repair",
+          "tests",
+          "abort"
+        ],
+        "status": "failed"
+      },
+      "id": "bounded-failure",
+      "loop": {
+        "attempts": 3,
+        "matches_expected": true,
+        "metrics": {
+          "cached_steps": 0,
+          "completion_tokens": 144,
+          "elapsed_seconds": 0.0010902881622314453,
+          "llm_calls": 6,
+          "prompt_tokens": 571,
+          "tool_calls": 7,
+          "total_tokens": 715
+        },
+        "path": [
+          "intake",
+          "context",
+          "plan",
+          "implement",
+          "tests",
+          "diagnose",
+          "plan",
+          "implement",
+          "tests",
+          "diagnose",
+          "plan",
+          "implement",
+          "tests",
+          "diagnose",
+          "abort"
+        ],
+        "status": "failed"
+      },
+      "task": "fix broken regression [force-fail-always]"
+    }
+  ],
+  "interpretation": {
+    "purpose": "Compare graph-controlled reuse and routing against retry-from-the-top execution.",
+    "warning": "Mock-mode results test control-flow economics, not model intelligence. Use real tasks, deterministic evaluators, and a local model endpoint for capability claims."
+  },
+  "summary": {
+    "case_count": 4,
+    "delta_graph_minus_loop": {
+      "average_llm_calls": -1.75,
+      "average_path_length": -0.5,
+      "average_tokens": -183.75,
+      "average_tool_calls": 1.25,
+      "expected_outcome_rate": 0.0
+    },
+    "graph": {
+      "average_llm_calls": 2.5,
+      "average_path_length": 9.5,
+      "average_tokens": 273.75,
+      "average_tool_calls": 5.0,
+      "expected_outcome_rate": 1.0
+    },
+    "loop": {
+      "average_llm_calls": 4.25,
+      "average_path_length": 10.0,
+      "average_tokens": 457.5,
+      "average_tool_calls": 3.75,
+      "expected_outcome_rate": 1.0
+    }
+  }
+}
