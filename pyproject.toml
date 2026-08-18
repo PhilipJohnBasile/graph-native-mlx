@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graph-native-model"
-version = "0.5.2"
+version = "0.5.3"
 description = "A graph-native MLX coding runtime with Qwen hidden-state policy fusion, durable Git workspaces, M5 qualification, and held-out graph optimization."
 readme = "README.md"
 requires-python = ">=3.11"

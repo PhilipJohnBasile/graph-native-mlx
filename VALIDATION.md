@@ -1,4 +1,4 @@
-# Validation Record — v0.5.2
+# Validation Record — v0.5.3
 
 ## Portable validation environment
 
@@ -9,7 +9,7 @@
 
 ## Completed checks
 
-- 99 portable tests passed
+- 101 portable tests passed
 - all source and test modules compiled with `compileall`
 - YAML graph validated as 12 nodes, 19 edges, and 2 terminals
 - generated default graph module reproduced from the YAML source
@@ -37,6 +37,9 @@
 - durable policy-call, policy-prefill-token, and transition-latency accounting passed
 - policy binding to graph schema, model fingerprint, extractor schema, dimensions, configuration, and file hashes passed
 - repository trace collection, hidden-required export, homogeneous-dataset enforcement, run-level splitting, AdamW training, early stopping, and best-weight restoration passed
+- failed-run route/edge/stop imitation is reward-masked to zero while failed runs remain active for value and cost learning
+- controlled bootstrap corpus generation produced 16 clean Git repositories spanning fast, deep, repair, no-change, completed, and bounded-failure cases without embedding expected labels in the worktree
+- bootstrap collector shell syntax and dedicated trace/export paths passed portable validation
 
 ## v0.5 qualification checks
 

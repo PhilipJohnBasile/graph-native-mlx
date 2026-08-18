@@ -55,6 +55,20 @@ def policy_config_for_records(
     )
 
 
+def action_imitation_weights(
+    records: Sequence[PolicyTrainingRecord],
+) -> tuple[float, ...]:
+    """Return per-decision imitation weights derived from terminal reward.
+
+    Successful executions currently carry reward 1.0 and may teach the
+    selected route/edge/stop action. Failed executions carry reward 0.0 and
+    therefore train only value and cost targets, not action imitation.
+    Fractional rewards remain supported for future graded outcomes.
+    """
+
+    return tuple(float(record.reward) for record in records)
+
+
 def split_policy_records(
     records: Sequence[PolicyTrainingRecord],
     *,
@@ -176,6 +190,7 @@ def train_mlx_policy_file(
                 [list(record.allowed_stop_mask) for record in rows],
                 dtype=mx.bool_,
             ),
+            mx.array(action_imitation_weights(rows), dtype=mx.float32),
             mx.array([record.reward for record in rows], dtype=mx.float32),
             mx.array([list(record.cost_target) for record in rows], dtype=mx.float32),
         )
@@ -183,12 +198,15 @@ def train_mlx_policy_file(
     train_arrays = arrays_for(train_records)
     validation_arrays = arrays_for(validation_records) if validation_records else None
 
-    def masked_cross_entropy(logits, labels):
+    def masked_cross_entropy(logits, labels, imitation_weight):
         valid = labels >= 0
         safe_labels = mx.where(valid, labels, mx.zeros_like(labels))
         losses = nn.losses.cross_entropy(logits, safe_labels, reduction="none")
-        valid_float = valid.astype(mx.float32)
-        return (losses * valid_float).sum() / mx.maximum(valid_float.sum(), 1.0)
+        effective_weight = valid.astype(mx.float32) * imitation_weight
+        return (losses * effective_weight).sum() / mx.maximum(
+            effective_weight.sum(),
+            1.0,
+        )
 
     def loss_fn(
         model,
@@ -199,6 +217,7 @@ def train_mlx_policy_file(
         stop_y,
         edge_allowed,
         stop_allowed,
+        imitation_weight_y,
         reward_y,
         cost_y,
     ):
@@ -216,9 +235,21 @@ def train_mlx_policy_file(
             stop_logits,
             mx.full_like(stop_logits, -1e9),
         )
-        route_loss = masked_cross_entropy(route_logits, route_y)
-        edge_loss = masked_cross_entropy(masked_edge_logits, edge_y)
-        stop_loss = masked_cross_entropy(masked_stop_logits, stop_y)
+        route_loss = masked_cross_entropy(
+            route_logits,
+            route_y,
+            imitation_weight_y,
+        )
+        edge_loss = masked_cross_entropy(
+            masked_edge_logits,
+            edge_y,
+            imitation_weight_y,
+        )
+        stop_loss = masked_cross_entropy(
+            masked_stop_logits,
+            stop_y,
+            imitation_weight_y,
+        )
         value_prediction = mx.sigmoid(value[:, 0])
         value_loss = ((value_prediction - reward_y) ** 2).mean()
         cost_prediction = nn.softplus(cost)

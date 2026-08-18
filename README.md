@@ -8,7 +8,7 @@ The central rule is:
 
 This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, effects, verification order, budgets, retries, termination, recovery, and promotion.
 
-## v0.5.2 capabilities
+## v0.5.3 capabilities
 
 ### MLX-native model and policy path
 
@@ -122,8 +122,8 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.5.2.zip
-cd graph-native-model-mlx-v0.5.2
+unzip graph-native-model-mlx-v0.5.3.zip
+cd graph-native-model-mlx-v0.5.3
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -139,10 +139,10 @@ The base package and portable tests work on non-MLX systems. The `mlx` extra is 
 
 The release includes a state-preserving upgrade helper. It keeps the existing virtual environment, `.graph-env`, `.graph-model` database, hidden-state artifacts, detached worktrees, and verified patches, while backing up the prior source tree.
 
-After extracting the v0.5.2 source archive:
+After extracting the v0.5.3 source archive:
 
 ```bash
-cd graph-native-model-mlx-v0.5.2
+cd graph-native-model-mlx-v0.5.3
 ./scripts/upgrade-mac-in-place.sh
 ```
 
@@ -187,7 +187,7 @@ graph-model mlx-doctor
 graph-model mlx-doctor --load-model
 ```
 
-v0.5.2 includes one evidence-producing qualification command:
+v0.5.3 includes one evidence-producing qualification command:
 
 ```bash
 graph-model qualify-mac \
@@ -243,7 +243,7 @@ When an absolute Python command is the active virtual-environment interpreter, t
 
 ### Execution boundary
 
-Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.2 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
+Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.3 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
 
 ## Inspect, promote, clean up, and resume
 
@@ -286,6 +286,16 @@ graph-model resume \
 ```
 
 Resume requires the same graph version, provider identity, controller identity, policy configuration, and policy-file fingerprints.
+
+## Bootstrap the policy-data pipeline
+
+The v0.5.3 source archive includes a controlled 16-repository bootstrap corpus spanning fast, deep, repair, no-change, successful, and bounded-failure executions. It uses a dedicated trace database and never activates weights automatically:
+
+```bash
+scripts/collect-bootstrap-policy-corpus-mac.sh
+```
+
+Use this only to qualify the collection/export pipeline. Real policy training should add substantially more varied real-repository traces and held-out tasks.
 
 ## Collect state-aware policy traces
 

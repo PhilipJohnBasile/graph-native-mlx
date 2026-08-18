@@ -47,3 +47,24 @@ def test_policy_split_is_deterministic() -> None:
     first = split_policy_records(records, validation_fraction=0.2, seed=7)
     second = split_policy_records(records, validation_fraction=0.2, seed=7)
     assert first == second
+
+
+def test_failed_runs_do_not_receive_action_imitation_weight() -> None:
+    from graph_model.mlx_native.trainer import action_imitation_weights
+
+    successful = _record("success", "intake")
+    failed = PolicyTrainingRecord(
+        run_id="failed",
+        node_id="intake",
+        decision_type="route",
+        features=(0.0,),
+        route_label=2,
+        edge_label=-1,
+        stop_label=-1,
+        allowed_edge_mask=(False,),
+        allowed_stop_mask=(False, False, False, False),
+        reward=0.0,
+        cost_target=(0.9, 0.8, 0.7),
+    )
+
+    assert action_imitation_weights([successful, failed]) == (1.0, 0.0)

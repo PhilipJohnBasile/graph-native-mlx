@@ -187,3 +187,13 @@ Hidden-aware policy loading is fail-closed:
 - unsupported backbone: capture fails before graph execution proceeds
 
 The graph retains deterministic hardcoded priors when no hidden policy is configured.
+
+## Bootstrap corpus
+
+After M5 qualification, the source package includes a controlled route/status-diverse corpus generator and collector. It is intended to prove the end-to-end trace/export path before real-project collection:
+
+```bash
+scripts/collect-bootstrap-policy-corpus-mac.sh
+```
+
+The bootstrap collector uses a dedicated database and does not activate policy weights. It exports successful and failed records; failed records have zero route/edge/stop imitation weight in v0.5.3 but remain available for value and cost learning. Treat the fixtures as pipeline qualification data, not as a production-quality training corpus.
