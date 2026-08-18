@@ -187,14 +187,28 @@ def _parse_json_object(content: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end <= start:
-            raise ProviderError(f"model did not return a JSON object: {content[:300]!r}")
-        try:
-            parsed = json.loads(text[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise ProviderError(f"invalid JSON returned by model: {exc}") from exc
+        decoder = json.JSONDecoder()
+        parsed = None
+        best_position: tuple[int, int] | None = None
+        last_error: json.JSONDecodeError | None = None
+        for index, character in enumerate(text):
+            if character != "{":
+                continue
+            try:
+                candidate, consumed = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(candidate, dict):
+                # Prefer the object that ends latest in the response. For equal end positions,
+                # prefer the earliest opening brace so an outer object wins over a nested object.
+                position = (index + consumed, -index)
+                if best_position is None or position > best_position:
+                    parsed = candidate
+                    best_position = position
+        if parsed is None:
+            detail = f": {last_error}" if last_error is not None else ""
+            raise ProviderError(f"model did not return a valid JSON object{detail}")
     if not isinstance(parsed, dict):
         raise ProviderError("model JSON response must be an object")
     return parsed

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .controller import GraphController, route_difficulty
 from .models import NodeResult, NodeSpec, RunState
 from .provider import ModelProvider
-from .router_policy import load_router_cached
 
 
 @dataclass(frozen=True)
@@ -17,6 +16,7 @@ class ExecutionContext:
     state: RunState
     node: NodeSpec
     provider: ModelProvider
+    controller: GraphController
     idempotency_key: str
 
 
@@ -61,76 +61,18 @@ def _stable_key(value: Any) -> str:
 
 
 async def route_task(ctx: ExecutionContext) -> NodeResult:
-    task = ctx.state.task.lower()
-    deep_markers = (
-        "architecture",
-        "feature",
-        "refactor",
-        "migration",
-        "design",
-        "implement across",
-        "multi-file",
-        "security",
-        "production",
-        "benchmark",
-    )
-    repair_markers = ("ci", "failing", "failure", "bug", "error", "regression", "broken")
-    fast_markers = ("typo", "rename", "one line", "small patch", "quick fix", "format")
-
-    if any(marker in task for marker in repair_markers):
-        rule_route = "repair"
-    elif any(marker in task for marker in deep_markers) or len(task) > 500:
-        rule_route = "deep"
-    elif any(marker in task for marker in fast_markers) or len(task) < 140:
-        rule_route = "fast"
-    else:
-        rule_route = "deep"
-
-    route = rule_route
-    router_source = "rule"
-    confidence = 1.0
-    probabilities: dict[str, float] = {rule_route: 1.0}
-    notes = ["Rule router selected a validated subgraph."]
-
-    policy_path = os.getenv("GRAPH_MODEL_ROUTER_PATH")
-    if policy_path:
-        try:
-            prediction = load_router_cached(policy_path).predict(ctx.state.task)
-            threshold = float(os.getenv("GRAPH_MODEL_ROUTER_MIN_CONFIDENCE", "0.55"))
-            probabilities = prediction.probabilities
-            confidence = prediction.confidence
-            if prediction.confidence >= threshold:
-                route = prediction.route
-                router_source = "learned"
-                notes = ["Learned route policy selected among graph-validated paths."]
-            else:
-                notes = [
-                    "Learned route confidence was below threshold; deterministic fallback used."
-                ]
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            notes = [f"Learned router unavailable; deterministic fallback used: {exc}"]
-
-    if route == "fast":
-        difficulty = "low"
-    elif route == "repair":
-        difficulty = "medium"
-    else:
-        difficulty = "high" if len(task) > 300 or any(m in task for m in deep_markers) else "medium"
-
+    decision = ctx.controller.select_route(ctx.state.task, ctx.state)
+    route = decision.route
+    difficulty = route_difficulty(ctx.state.task, route)
     return NodeResult(
         delta={
             "route": route,
             "difficulty": difficulty,
             "verdict": "pending",
-            "router": {
-                "source": router_source,
-                "rule_route": rule_route,
-                "confidence": confidence,
-                "probabilities": probabilities,
-            },
+            "router": decision.as_dict(),
         },
-        progress_key=f"route:{route}:{difficulty}:{router_source}",
-        notes=notes,
+        progress_key=f"route:{route}:{difficulty}:{decision.source}",
+        notes=list(decision.notes),
     )
 
 

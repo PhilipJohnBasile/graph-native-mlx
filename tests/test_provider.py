@@ -58,3 +58,10 @@ async def test_openai_provider_strict_json_mode_does_not_fallback() -> None:
     )
     with pytest.raises(ProviderError, match="model request failed"):
         await provider.complete_json(system="system", user="user")
+
+
+def test_parse_json_object_prefers_the_last_complete_outer_object() -> None:
+    parsed = _parse_json_object(
+        'analysis example {"wrong": true} final {"ok": {"nested": true}} trailing'
+    )
+    assert parsed == {"ok": {"nested": True}}

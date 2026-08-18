@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.graph-model/
+build/
+dist/
+*.egg-info/
+.DS_Store

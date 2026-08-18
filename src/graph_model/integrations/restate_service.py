@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from graph_model.controller import DeterministicGraphController
 from graph_model.graph import load_default_graph
 from graph_model.models import Budget, NodeResult, RunState
 from graph_model.operators import ExecutionContext, OperatorRegistry
@@ -47,6 +48,7 @@ async def _execute_node(
             state=state,
             node=node,
             provider=OpenAICompatibleProvider.from_env(),
+            controller=DeterministicGraphController(),
             idempotency_key=idempotency_key,
         )
     )

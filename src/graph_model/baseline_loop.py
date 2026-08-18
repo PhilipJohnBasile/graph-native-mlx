@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .controller import DeterministicGraphController
 from .graph import load_default_graph
 from .models import RunMetrics, RunState
 from .operators import ExecutionContext, OperatorRegistry
@@ -41,6 +42,7 @@ class RalphLoopBaseline:
         self.max_attempts = max_attempts
         self.registry = OperatorRegistry.defaults()
         self.graph = load_default_graph()
+        self.controller = DeterministicGraphController()
 
     async def run(self, task: str) -> LoopResult:
         state = RunState.new(graph=self.graph, task=task)
@@ -101,6 +103,7 @@ class RalphLoopBaseline:
                 state=state.model_copy(deep=True),
                 node=node,
                 provider=self.provider,
+                controller=self.controller,
                 idempotency_key=f"loop:{node_id}:{invocation_index}",
             )
         )

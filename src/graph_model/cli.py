@@ -7,10 +7,12 @@ import os
 from pathlib import Path
 
 from .benchmark import run_graph_vs_loop_benchmark
+from .controller import DeterministicGraphController, GraphController
 from .graph import load_default_graph, load_graph
-from .provider import MockProvider, OpenAICompatibleProvider
+from .models import GraphSpec
+from .provider import MockProvider, ModelProvider, OpenAICompatibleProvider, ProviderError
 from .router_policy import HashedLinearRouter, train_router_file
-from .runtime import BudgetExceeded, GraphRuntime
+from .runtime import BudgetExceeded, GraphRuntime, GraphRuntimeError
 from .store import SQLiteRunStore
 from .trace_export import export_router_training_data
 
@@ -19,18 +21,44 @@ def _store(path: str | None) -> SQLiteRunStore:
     return SQLiteRunStore(path or os.getenv("GRAPH_MODEL_DB", ".graph-model/runs.sqlite3"))
 
 
-def _provider(name: str):
-    return MockProvider() if name == "mock" else OpenAICompatibleProvider.from_env()
+def _provider(name: str) -> ModelProvider:
+    if name == "mock":
+        return MockProvider()
+    if name == "openai":
+        return OpenAICompatibleProvider.from_env()
+    if name == "mlx":
+        from .mlx_native.provider import MLXLocalProvider
+
+        return MLXLocalProvider.from_env()
+    raise ValueError(f"unknown provider {name!r}")
+
+
+def _controller(name: str, graph: GraphSpec, *, provider_name: str) -> GraphController:
+    selected = "mlx" if name == "auto" and provider_name == "mlx" else name
+    if selected == "auto":
+        selected = "deterministic"
+    if selected == "deterministic":
+        return DeterministicGraphController()
+    if selected == "mlx":
+        from .mlx_native.controller import MLXGraphController
+
+        return MLXGraphController.from_env(graph)
+    raise ValueError(f"unknown controller {name!r}")
+
+
+def _load_selected_graph(path: str | None) -> GraphSpec:
+    return load_graph(path) if path else load_default_graph()
 
 
 async def _run_command(args: argparse.Namespace) -> int:
-    graph = load_graph(args.graph) if args.graph else load_default_graph()
-    runtime = GraphRuntime(
-        graph=graph,
-        store=_store(args.db),
-        provider=_provider(args.provider),
-    )
     try:
+        graph = _load_selected_graph(args.graph)
+        runtime = GraphRuntime(
+            graph=graph,
+            store=_store(args.db),
+            provider=_provider(args.provider),
+            controller=_controller(args.controller, graph, provider_name=args.provider),
+        )
         state = await runtime.run(
             args.task,
             run_id=args.run_id,
@@ -39,32 +67,55 @@ async def _run_command(args: argparse.Namespace) -> int:
     except BudgetExceeded as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
         return 2
+    except (ProviderError, GraphRuntimeError, ValueError, RuntimeError) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
+        return 2
     print(state.model_dump_json(indent=2))
     return 0 if state.status != "failed" else 1
 
 
 async def _benchmark_command(args: argparse.Namespace) -> int:
-    report = await run_graph_vs_loop_benchmark(
-        input_path=args.input,
-        provider=_provider(args.provider),
-        output_path=args.output,
-        loop_attempts=args.loop_attempts,
-    )
+    try:
+        graph = load_default_graph()
+        report = await run_graph_vs_loop_benchmark(
+            input_path=args.input,
+            provider=_provider(args.provider),
+            output_path=args.output,
+            loop_attempts=args.loop_attempts,
+            controller=_controller(args.controller, graph, provider_name=args.provider),
+        )
+    except (ProviderError, ValueError, RuntimeError) as exc:
+        print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
+        return 2
     print(json.dumps(report["summary"], indent=2, sort_keys=True))
     return 0
 
 
 async def _resume_command(args: argparse.Namespace) -> int:
-    graph = load_graph(args.graph) if args.graph else load_default_graph()
-    runtime = GraphRuntime(
-        graph=graph,
-        store=_store(args.db),
-        provider=_provider(args.provider),
-    )
     try:
+        graph = _load_selected_graph(args.graph)
+        runtime = GraphRuntime(
+            graph=graph,
+            store=_store(args.db),
+            provider=_provider(args.provider),
+            controller=_controller(args.controller, graph, provider_name=args.provider),
+        )
         state = await runtime.run(run_id=args.run_id)
     except BudgetExceeded as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
+        return 2
+    except (ProviderError, GraphRuntimeError, ValueError, RuntimeError) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
         return 2
     print(state.model_dump_json(indent=2))
     return 0 if state.status != "failed" else 1
@@ -79,6 +130,40 @@ def _trace_command(args: argparse.Namespace) -> int:
 def _export_command(args: argparse.Namespace) -> int:
     count = export_router_training_data(_store(args.db), args.output)
     print(json.dumps({"records": count, "output": str(Path(args.output).resolve())}, indent=2))
+    return 0
+
+
+def _export_mlx_policy_command(args: argparse.Namespace) -> int:
+    from .mlx_native.training_data import export_mlx_policy_training_data
+
+    graph = _load_selected_graph(args.graph)
+    count = export_mlx_policy_training_data(
+        _store(args.db),
+        args.output,
+        graph=graph,
+        success_only=args.success_only,
+    )
+    print(json.dumps({"records": count, "output": str(Path(args.output).resolve())}, indent=2))
+    return 0
+
+
+def _train_mlx_policy_command(args: argparse.Namespace) -> int:
+    from .mlx_native.trainer import train_mlx_policy_file
+
+    try:
+        summary = train_mlx_policy_file(
+            input_path=args.input,
+            output_dir=args.output_dir,
+            graph=_load_selected_graph(args.graph),
+            hidden_size=args.hidden_size,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+        )
+    except (ValueError, RuntimeError) as exc:
+        print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
     return 0
 
 
@@ -113,12 +198,15 @@ def _predict_route_command(args: argparse.Namespace) -> int:
 
 
 def _validate_command(args: argparse.Namespace) -> int:
-    graph = load_graph(args.graph) if args.graph else load_default_graph()
+    from .mlx_native.graph_tables import graph_schema_hash
+
+    graph = _load_selected_graph(args.graph)
     print(
         json.dumps(
             {
                 "name": graph.name,
                 "version": graph.version,
+                "schema_hash": graph_schema_hash(graph),
                 "nodes": len(graph.nodes),
                 "edges": len(graph.edges),
                 "terminals": sorted(graph.terminals),
@@ -129,6 +217,58 @@ def _validate_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compile_graph_command(args: argparse.Namespace) -> int:
+    from .mlx_native.graph_tables import compile_graph, write_generated_module
+
+    graph = _load_selected_graph(args.graph)
+    tables = compile_graph(graph)
+    output = write_generated_module(tables, args.output)
+    print(
+        json.dumps(
+            {
+                "output": str(output.resolve()),
+                "graph": f"{tables.name}@{tables.version}",
+                "schema_hash": tables.schema_hash,
+                "nodes": len(tables.node_ids),
+                "edges": len(tables.edge_keys),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _policy_config_command(args: argparse.Namespace) -> int:
+    from .mlx_native.graph_tables import compile_graph
+    from .mlx_native.policy import GraphPolicyConfig
+
+    graph = _load_selected_graph(args.graph)
+    config = GraphPolicyConfig.for_graph(compile_graph(graph), hidden_size=args.hidden_size)
+    output = config.save(args.output)
+    print(json.dumps({"output": str(output.resolve()), **config.__dict__}, indent=2))
+    return 0
+
+
+def _mlx_doctor_command(args: argparse.Namespace) -> int:
+    from .mlx_native.doctor import mlx_diagnostics
+
+    report = mlx_diagnostics(load_model=args.load_model)
+    print(json.dumps(report, indent=2, default=str, sort_keys=True))
+    return 0 if report.get("ready") else 1
+
+
+def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--graph")
+    parser.add_argument("--db")
+    parser.add_argument("--provider", choices=("mock", "openai", "mlx"), default="mock")
+    parser.add_argument(
+        "--controller",
+        choices=("auto", "deterministic", "mlx"),
+        default="auto",
+        help="auto selects the MLX controller when --provider mlx, otherwise deterministic",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="graph-model")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -136,22 +276,21 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="start a graph execution")
     run.add_argument("--task", required=True)
     run.add_argument("--run-id")
-    run.add_argument("--graph")
-    run.add_argument("--db")
-    run.add_argument("--provider", choices=("mock", "openai"), default="mock")
+    _add_runtime_options(run)
     run.add_argument("--stop-after-steps", type=int)
 
     benchmark = subparsers.add_parser("benchmark", help="compare graph execution with a retry loop")
     benchmark.add_argument("--input", required=True)
     benchmark.add_argument("--output")
-    benchmark.add_argument("--provider", choices=("mock", "openai"), default="mock")
+    benchmark.add_argument("--provider", choices=("mock", "openai", "mlx"), default="mock")
+    benchmark.add_argument(
+        "--controller", choices=("auto", "deterministic", "mlx"), default="auto"
+    )
     benchmark.add_argument("--loop-attempts", type=int, default=3)
 
     resume = subparsers.add_parser("resume", help="resume a checkpointed execution")
     resume.add_argument("--run-id", required=True)
-    resume.add_argument("--graph")
-    resume.add_argument("--db")
-    resume.add_argument("--provider", choices=("mock", "openai"), default="mock")
+    _add_runtime_options(resume)
 
     trace = subparsers.add_parser("trace", help="inspect an execution trace")
     trace.add_argument("--run-id", required=True)
@@ -160,6 +299,27 @@ def build_parser() -> argparse.ArgumentParser:
     export = subparsers.add_parser("export", help="export router training records")
     export.add_argument("--output", required=True)
     export.add_argument("--db")
+
+    export_mlx = subparsers.add_parser(
+        "export-mlx-policy",
+        help="export MLX route/edge/stop/value/cost training records from traces",
+    )
+    export_mlx.add_argument("--output", required=True)
+    export_mlx.add_argument("--graph")
+    export_mlx.add_argument("--db")
+    export_mlx.add_argument("--success-only", action="store_true")
+
+    train_mlx = subparsers.add_parser(
+        "train-mlx-policy",
+        help="train the MLX graph-policy sidecar from exported decision traces",
+    )
+    train_mlx.add_argument("--input", required=True)
+    train_mlx.add_argument("--output-dir", required=True)
+    train_mlx.add_argument("--graph")
+    train_mlx.add_argument("--hidden-size", type=int, default=128)
+    train_mlx.add_argument("--epochs", type=int, default=100)
+    train_mlx.add_argument("--learning-rate", type=float, default=1e-3)
+    train_mlx.add_argument("--seed", type=int, default=42)
 
     train_router = subparsers.add_parser("train-router", help="train the constrained route policy")
     train_router.add_argument("--input", required=True)
@@ -177,6 +337,26 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="validate a graph specification")
     validate.add_argument("--graph")
 
+    compile_graph_parser = subparsers.add_parser(
+        "compile-graph",
+        help="compile a validated YAML graph into immutable Python tables and masks",
+    )
+    compile_graph_parser.add_argument("--graph")
+    compile_graph_parser.add_argument("--output", required=True)
+
+    policy_config = subparsers.add_parser(
+        "policy-config",
+        help="write a graph-bound config for MLX route/edge/stop/value/cost heads",
+    )
+    policy_config.add_argument("--graph")
+    policy_config.add_argument("--output", required=True)
+    policy_config.add_argument("--hidden-size", type=int, default=128)
+
+    mlx_doctor = subparsers.add_parser(
+        "mlx-doctor", help="inspect MLX, MLX-LM, model, adapter, and policy configuration"
+    )
+    mlx_doctor.add_argument("--load-model", action="store_true")
+
     return parser
 
 
@@ -193,12 +373,22 @@ def main() -> None:
         code = _trace_command(args)
     elif args.command == "export":
         code = _export_command(args)
+    elif args.command == "export-mlx-policy":
+        code = _export_mlx_policy_command(args)
+    elif args.command == "train-mlx-policy":
+        code = _train_mlx_policy_command(args)
     elif args.command == "train-router":
         code = _train_router_command(args)
     elif args.command == "predict-route":
         code = _predict_route_command(args)
     elif args.command == "validate":
         code = _validate_command(args)
+    elif args.command == "compile-graph":
+        code = _compile_graph_command(args)
+    elif args.command == "policy-config":
+        code = _policy_config_command(args)
+    elif args.command == "mlx-doctor":
+        code = _mlx_doctor_command(args)
     else:
         parser.error(f"unknown command: {args.command}")
         return

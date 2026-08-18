@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .baseline_loop import RalphLoopBaseline
+from .controller import GraphController
 from .graph import load_default_graph
 from .provider import ModelProvider
 from .runtime import GraphRuntime
@@ -28,6 +29,7 @@ async def run_graph_vs_loop_benchmark(
     provider: ModelProvider,
     output_path: str | Path | None = None,
     loop_attempts: int = 3,
+    controller: GraphController | None = None,
 ) -> dict[str, Any]:
     cases = _read_cases(input_path)
     if not cases:
@@ -35,7 +37,12 @@ async def run_graph_vs_loop_benchmark(
 
     with tempfile.TemporaryDirectory(prefix="graph-model-benchmark-") as temp_dir:
         store = SQLiteRunStore(Path(temp_dir) / "runs.sqlite3")
-        runtime = GraphRuntime(graph=load_default_graph(), store=store, provider=provider)
+        runtime = GraphRuntime(
+            graph=load_default_graph(),
+            store=store,
+            provider=provider,
+            controller=controller,
+        )
         loop = RalphLoopBaseline(provider=provider, max_attempts=loop_attempts)
         rows: list[dict[str, Any]] = []
 

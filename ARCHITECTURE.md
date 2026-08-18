@@ -1,27 +1,19 @@
-# Graph-Native Model Architecture
+# Graph-Native MLX Architecture
 
 ## Thesis
 
 A loop is not inherently wrong. An unbounded loop with implicit state, self-judged progress, replayed side effects, and no terminal policy is wrong.
 
-The system therefore treats the workflow as a versioned executable model:
+This system treats the workflow as a versioned executable control model:
 
 - **nodes** are typed operations
-- **edges** are allowed transitions
+- **edges** are the only legal transitions
 - **state** is explicit and checkpointed
 - **verifiers** produce evidence rather than vague reflection
 - **cycles** have traversal limits, progress checks, and abort paths
 - **the language model proposes work but does not own control flow**
 
-The correct amount of dynamism is the minimum required by the workload. Start with a validated scaffold, route or prune per task, generate a new graph only when known paths are structurally insufficient, and edit only a bounded failed region when runtime evidence requires it.
-
-## Three learning layers
-
-1. **Node policy** — how a planner, executor, verifier, retriever, or repair node behaves.
-2. **Routing policy** — which validated path and model tier a task should use.
-3. **Graph policy** — which nodes and edges should exist for a task family.
-
-The first release externalizes all three so they are inspectable. Later releases train the route policy and distill winning graph traces into the backbone.
+The graph is the control plane. A loop is a named, bounded, observable back-edge.
 
 ## Production shape
 
@@ -29,187 +21,198 @@ The first release externalizes all three so they are inspectable. Later releases
 request
   │
   ▼
-feature extraction ──► constrained route policy
-  │                              │
-  │                              ▼
-  └────────────────────► versioned supergraph
-                                 │
-                    ┌────────────┼────────────┐
-                    ▼            ▼            ▼
-                fast path    planned path   repair path
-                    │            │            │
-                    └────────────┴─────► verifier gates
-                                           │
-                               pass ────────┴────── fail
-                                │                    │
-                                ▼                    ▼
-                              finish          bounded local graft
+resident Qwen MLX backbone ───────────────► typed node artifact
+  │                                                │
+  │                                                ▼
+  │                                    runtime conditions and limits
+  │                                                │
+  ▼                                                ▼
+explicit task/run-state features ───────► MLX policy residuals
+                                                   │
+compiled structural graph mask ────────────────────┤
+                                                   ▼
+                                      hard-masked MLX decision
+                                                   │
+                                                   ▼
+                                      durable executor commits
+                                      tools / tests / checkpoint
 ```
 
-A loop is represented as a back-edge in this graph. It is never an invisible `while not done` instruction delegated to the model.
+The model and policy may rank valid actions. Only the runtime can commit a transition or terminal status.
+
+## Four learning layers
+
+1. **Node policy** — how a planner, executor, verifier, retriever, or repair node behaves.
+2. **Route policy** — which validated task-level path should run.
+3. **Transition policy** — which condition-valid edge is best and whether expected progress justifies continuing.
+4. **Graph policy** — which nodes and edges should be promoted for a task family after offline evaluation.
+
+Version 0.2 implements the first three control interfaces. Graph-structure optimization remains offline and bounded.
 
 ## Typed run state
 
 Each run records:
 
-- run ID, graph name, and immutable graph version
-- task, constraints, route, and difficulty estimate
-- current node and completed-node path
-- artifacts, evidence, and verifier decisions
-- repair and edge-traversal counts
-- model-call, tool-call, token, time, and step budgets
+- run ID, graph name, immutable version, and schema hash
+- task, route, difficulty estimate, and current node
+- completed-node path and edge-traversal counts
+- artifacts, verifier evidence, and repair state
+- LLM-call, tool-call, token, time, step, and no-progress budgets
 - a repeated-progress signature
 - stable idempotency keys for external effects
-- model, prompt, adapter, and tool-schema versions when integrated
+- provider and controller identities
+- policy config and weights fingerprints when a sidecar is active
 
-A node returns a `NodeResult` containing a state delta, artifacts, optional terminal output, verdict, progress key, token accounting, and notes. It cannot directly jump to another node. The runtime alone selects a matching validated edge.
+A node returns a `NodeResult` containing a state delta, artifacts, optional output, verdict, progress key, token accounting, and notes. It cannot name or jump to the next node.
 
-## Initial coding supergraph
+## Compiled graph authority
 
-The default graph supports three task-level routes:
+The editable YAML graph is compiled into immutable Python tables. The compiler emits stable IDs, adjacency rows, traversal limits, terminal masks, and a deterministic SHA-256 over the normalized graph.
+
+Transition selection has two masks:
+
+1. **Structural mask:** an edge must originate at the current node in the compiled graph.
+2. **Runtime mask:** its predicate must pass and its traversal count must remain below the cap.
+
+Optional policy logits are added before the hard mask. The runtime validates the selected edge against the candidate set again before committing it. A policy cannot create a node, unmask an edge, bypass a verifier, or raise its own budget.
+
+## Default coding supergraph
+
+The graph supports three routes:
 
 - **fast:** context → implement → tests → semantic review
 - **deep:** context → plan → plan verifier → implement → tests → semantic review
-- **repair:** the planned path, followed by a bounded diagnose/repair region when evidence rejects the candidate
+- **repair:** planned execution followed by bounded diagnose/repair when evidence rejects the candidate
 
-The plan can be revised once. Candidate repair can traverse its back-edge twice. When the limit is exhausted, the run reaches an explicit failed terminal rather than continuing until a model happens to say it is done.
+The plan can be revised within its configured edge cap. Candidate repair is also bounded. Exhaustion reaches an explicit `abort` terminal rather than continuing until a model happens to declare success.
 
 ## Verifier ordering
 
-Cheap, deterministic verification comes before expensive semantic review:
+Cheap deterministic verification precedes expensive semantic review:
 
 1. schema and output-shape checks
 2. compilation, unit tests, static analysis, or domain constraints
 3. independent semantic review
-4. human approval only for configured high-risk effects
+4. human approval for configured high-risk effects
 
-The executor cannot mark its own work as verified. Verifier failure must include evidence that a diagnose node can transform into targeted repair state.
+The executor cannot mark its own work as verified. A failed verifier must leave evidence that a diagnose node can convert into targeted repair state.
+
+## MLX-native model boundary
+
+### Inside MLX
+
+- Qwen language generation through MLX-LM
+- explicit task/run-state feature tensors
+- route, edge, stop, success-value, and cost heads
+- hard masking, softmax, and argmax
+- policy-weight inference and training
+
+### Outside MLX
+
+- SQLite or Restate journal
+- shell commands and test processes
+- filesystem, GitHub, database, email, and deployment effects
+- secrets, permissions, and human approvals
+- idempotency records
+- final transition commit
+
+A tensor graph is not a transaction log. External durability is therefore a required part of the model system, not an incidental wrapper.
 
 ## Durability model
 
-The local runner uses SQLite for atomic state/checkpoint commits and stable node input hashes. This supports local resume and avoids redoing a committed node.
+The local runner writes atomic SQLite checkpoints using canonical node-input hashes. A completed cacheable node can be replayed without re-running model or tool work.
 
-There remains an unavoidable commit gap around external effects: a process can die after a remote system accepts a request but before the local transaction records success. Side-effecting tools must therefore accept idempotency keys.
+There remains a commit gap around an external operation: a process can fail after a remote system accepts the request but before local success is recorded. Side-effecting tools must accept stable idempotency keys.
 
-The Restate adapter closes more of this gap by journaling each node action and replaying its result during recovery. The graph loop uses deterministic journaled time rather than process-local wall-clock time.
+The optional Restate adapter journals node actions and replays completed results during recovery. Temporal can serve the same architectural role in another deployment.
 
-## Trainable routing controller
+## Implemented model roadmap
 
-The included route model is a constrained softmax classifier with stable hashed text features. It exists to establish the full learning loop without requiring another large dependency:
+### Stage 1 — Direct MLX compound model: implemented
 
-```text
-(task text) -> P(fast), P(deep), P(repair)
-```
+- One resident Qwen model/tokenizer via `mlx_lm.load`
+- In-process streamed generation
+- External typed graph and durable checkpointing
+- Deterministic verifier gates
 
-It is trained from exported production traces. A confidence gate retains the deterministic fallback. The controller cannot generate node IDs or edges outside the graph.
+### Stage 2 — MLX graph-policy sidecar: implemented
 
-The next controller should add visible-state and budget features:
+- Explicit task and run-state features
+- Route, edge, stop, value, and cost heads
+- MLX hard masks
+- Trace export and multi-task trainer
+- Graph-schema-bound Safetensors
 
-```text
-(task, state summary, allowed edges, remaining budget) -> selected edge/model tier
-```
+### Stage 3 — Hidden-state fusion and graph-aware LoRA: next
 
-## Model integration roadmap
+Add a Qwen-specific, tested hidden-state hook and concatenate selected hidden representations with explicit graph features. Train the controller and a small LoRA to:
 
-### Stage 1 — Graph-controlled compound model
+- emit concise typed node outputs
+- preserve evidence across nodes
+- distinguish claims from verifier proof
+- predict calibrated progress and cost
+- avoid a back-edge when state has not materially changed
 
-Use the existing Qwen3.8-27B MLX model as the shared planner, executor, and semantic verifier. Keep routing, checkpointing, and hard verification external. This stage is implemented in the starter.
-
-### Stage 2 — Learned route, cost, and stop policies
-
-Train:
-
-- a route head over allowed next edges
-- a success/progress head estimating whether another step has positive expected value
-- a cost head predicting tokens, latency, and tool calls
-- an escalation head predicting when a stronger model or human review is justified
-
-A practical objective is:
+A candidate objective is:
 
 ```text
 L = L_text
   + α CE(route)
-  + β BCE(success)
-  + γ Huber(cost)
-  + δ pairwise_rank(winning_trace, losing_trace)
-  + ε consistency(paraphrase_routes)
+  + β CE(masked_edge)
+  + γ CE(masked_stop)
+  + δ BCE(success)
+  + ε Huber(cost)
+  + ζ pairwise_rank(winning_trace, losing_trace)
 ```
-
-### Stage 3 — Graph-aware distillation
-
-Use offline graph search to produce positive and negative execution traces. LoRA/QLoRA-train the backbone to:
-
-- emit concise typed node outputs
-- preserve evidence and constraints across nodes
-- choose calibrated stop/escalate proposals
-- distinguish executor claims from verifier evidence
-- avoid requesting a back-edge when progress is unchanged
 
 The external graph remains authoritative after distillation.
 
+### Stage 4 — Speed and structural optimization
+
+- benchmark MTP/speculative generation inside LLM nodes
+- search graph variants offline with a cost-aware evaluator
+- promote only validated graph versions
+- permit at most one compatible local region graft when runtime evidence proves the current region is structurally insufficient
+
+MTP accelerates token generation. It does not own graph transitions, checkpoints, or side-effect replay.
+
 ## Offline graph optimization
 
-Search is performed against held-out tasks, not unrestricted live production requests. Candidate mutations may:
+Candidate mutations may:
 
 - insert or remove an optional verifier region
 - swap a node prompt, adapter, model, or decoding policy
-- adjust a bounded traversal limit
+- change a bounded traversal cap
 - alter decomposition or parallelization motifs
-- bypass redundant nodes
+- bypass a proven redundant node
 
-Score candidates with a cost-aware objective:
+Score candidates on held-out tasks:
 
 ```text
 reward = task_quality
-       - λ_token * tokens
-       - λ_time * latency
-       - λ_tool * tool_calls
-       - λ_risk * unsafe_or_duplicate_effects
+       - λ_token × tokens
+       - λ_time × latency
+       - λ_tool × tool_calls
+       - λ_risk × unsafe_or_duplicate_effects
 ```
 
-Promote a graph only after regression tests, paraphrase stability, tool-failure injection, schema-drift testing, and side-effect deduplication tests.
+Promotion requires regression tests, paraphrase stability, tool-failure injection, schema-drift tests, and duplicate-effect tests.
 
-## Inference-time local grafting
+## Evaluation
 
-Do not regenerate an entire graph for every request. Start with a globally validated supergraph and select a subgraph. When execution evidence proves that one region failed, replace only a single-entry/single-exit region with another compatible region from a validated library.
-
-A local graft must satisfy:
-
-- identical typed boundary inputs and outputs
-- a strict search and token budget
-- verifier improvement above a configured margin
-- no degradation of evidence support across the boundary
-- a cache key based on failure and task signature
-- an edit cap and explicit fallback
-
-Successful upstream state remains checkpointed.
-
-## Graph-versus-loop evaluation
-
-The project includes a bounded retry-from-the-top baseline. The benchmark must report more than final answer quality:
+The retry-from-the-top baseline is bounded and uses the same provider. Report:
 
 - success or deterministic evaluator score
 - cost per successful task
-- LLM and tool calls
+- model and tool calls
 - token and wall-clock cost
 - path length and repeated upstream nodes
 - duplicate external effects
 - crash/restart recovery
 - verifier false accepts and false rejects
-- route regret versus the best validated path
+- route regret
 - path stability under paraphrase
 - no-progress and budget termination rates
-- performance under tool failure and schema drift
+- behavior under tool failure and schema drift
 
-Mock-provider benchmarks validate control flow only. Capability claims require a real model, held-out tasks, stable evaluators, repeated seeds, and matched budgets.
-
-## Immediate build sequence for MTPLX/oMLX
-
-1. Point the provider at the current local Qwen3.8 endpoint.
-2. Replace simulated `run_tests` with a sandboxed repository/test operator.
-3. Add repository retrieval and patch-application nodes with idempotent tool contracts.
-4. Run the graph and retry-loop baseline on the same internal coding task set.
-5. Train the route policy on winning traces and measure route regret.
-6. Add constrained MCTS mutations for prompt, verifier placement, model tier, and repair depth.
-7. Promote only graph versions that improve held-out quality at equal or lower cost.
-8. Distill winning node traces into role adapters on the local backbone.
+Mock-provider results validate control flow only. Model capability claims require real held-out tasks, repeated seeds, stable evaluators, matched budgets, and identical tool environments.

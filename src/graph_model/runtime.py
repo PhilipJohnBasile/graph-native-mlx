@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .conditions import ConditionError, evaluate_condition
+from .controller import DeterministicGraphController, GraphController
 from .models import Budget, EdgeSpec, GraphSpec, NodeKind, NodeResult, RunState
 from .operators import ExecutionContext, OperatorRegistry
 from .provider import MockProvider, ModelProvider
@@ -18,6 +20,9 @@ class GraphRuntimeError(RuntimeError):
 
 class BudgetExceeded(GraphRuntimeError):
     pass
+
+
+EdgeSelector = Callable[[GraphSpec, RunState, str, Sequence[EdgeSpec]], EdgeSpec]
 
 
 def _canonical_hash(value: Any) -> str:
@@ -47,8 +52,15 @@ def _condition_context(state: RunState) -> dict[str, Any]:
     }
 
 
-def select_edge(graph: GraphSpec, state: RunState, node_id: str) -> EdgeSpec:
+def valid_outgoing_edges(graph: GraphSpec, state: RunState, node_id: str) -> list[EdgeSpec]:
+    """Return only graph-valid, condition-matching, non-exhausted outgoing edges.
+
+    This function is the authority boundary for every controller. A controller can rank the
+    returned candidates but cannot create a transition that is not present here.
+    """
+
     context = _condition_context(state)
+    candidates: list[EdgeSpec] = []
     exhausted: list[str] = []
     condition_errors: list[str] = []
     for edge in graph.outgoing(node_id):
@@ -62,15 +74,26 @@ def select_edge(graph: GraphSpec, state: RunState, node_id: str) -> EdgeSpec:
             condition_errors.append(f"{edge.key}: {exc}")
             continue
         if matches:
-            return edge
-    detail = []
+            candidates.append(edge)
+
+    if candidates:
+        return candidates
+
+    detail: list[str] = []
     if exhausted:
         detail.append(f"exhausted={exhausted}")
     if condition_errors:
         detail.append(f"condition_errors={condition_errors}")
     raise GraphRuntimeError(
-        f"no valid outgoing edge from {node_id!r}; " + ("; ".join(detail) or "no condition matched")
+        f"no valid outgoing edge from {node_id!r}; "
+        + ("; ".join(detail) or "no condition matched")
     )
+
+
+def select_edge(graph: GraphSpec, state: RunState, node_id: str) -> EdgeSpec:
+    """Compatibility helper that preserves the original deterministic priority behavior."""
+
+    return valid_outgoing_edges(graph, state, node_id)[0]
 
 
 def apply_node_result(
@@ -82,6 +105,7 @@ def apply_node_result(
     result: NodeResult,
     cached: bool,
     now: float | None = None,
+    edge_selector: EdgeSelector | None = None,
 ) -> str | None:
     _merge_dict(state.data, result.delta)
     _merge_dict(state.artifacts, result.artifacts)
@@ -116,7 +140,18 @@ def apply_node_result(
             state.error = "workflow reached the bounded abort node"
         return None
 
-    edge = select_edge(graph, state, node_id)
+    candidates = valid_outgoing_edges(graph, state, node_id)
+    edge = (
+        edge_selector(graph, state, node_id, tuple(candidates))
+        if edge_selector is not None
+        else candidates[0]
+    )
+    allowed_keys = {candidate.key for candidate in candidates}
+    if edge.key not in allowed_keys:
+        raise GraphRuntimeError(
+            "controller selected an invalid or masked edge: "
+            f"selected={edge.key!r}, allowed={sorted(allowed_keys)!r}"
+        )
     state.edge_counts[edge.key] = int(state.edge_counts.get(edge.key, 0)) + 1
     state.current_node = edge.target
     return edge.target
@@ -170,11 +205,13 @@ class GraphRuntime:
         store: SQLiteRunStore,
         registry: OperatorRegistry | None = None,
         provider: ModelProvider | None = None,
+        controller: GraphController | None = None,
     ) -> None:
         self.graph = graph
         self.store = store
         self.registry = registry or OperatorRegistry.defaults()
         self.provider = provider or MockProvider()
+        self.controller = controller or DeterministicGraphController()
 
     async def run(
         self,
@@ -200,6 +237,7 @@ class GraphRuntime:
             if not isinstance(runtime_metadata, dict):
                 raise ValueError("initial_data._runtime must be an object when provided")
             runtime_metadata["provider"] = self.provider.identity
+            runtime_metadata["controller"] = self.controller.identity
             self.store.create_run(state)
         else:
             self._validate_resume(state)
@@ -237,11 +275,37 @@ class GraphRuntime:
                         state=state.model_copy(deep=True),
                         node=node,
                         provider=self.provider,
+                        controller=self.controller,
                         idempotency_key=idempotency_key,
                     )
                 )
 
             previous_node = node.id
+            transition_payload: dict[str, Any] = {}
+
+            def controller_edge_selector(
+                graph: GraphSpec,
+                mutable_state: RunState,
+                node_id: str,
+                candidates: Sequence[EdgeSpec],
+            ) -> EdgeSpec:
+                stop = self.controller.select_stop(
+                    graph=graph,
+                    state=mutable_state,
+                    node_id=node_id,
+                    candidates=candidates,
+                )
+                edge_decision = self.controller.select_edge(
+                    graph=graph,
+                    state=mutable_state,
+                    node_id=node_id,
+                    candidates=candidates,
+                    stop=stop,
+                )
+                transition_payload["stop_decision"] = stop.as_dict()
+                transition_payload["edge_decision"] = edge_decision.as_dict()
+                return edge_decision.edge
+
             next_node = apply_node_result(
                 graph=self.graph,
                 state=state,
@@ -249,6 +313,7 @@ class GraphRuntime:
                 node_kind=node.kind,
                 result=result,
                 cached=cached,
+                edge_selector=controller_edge_selector,
             )
             self.store.commit_step(
                 state=state,
@@ -256,7 +321,11 @@ class GraphRuntime:
                 input_hash=input_hash,
                 result=result,
                 cached=cached,
-                event_payload={"next_node": next_node, "status": state.status},
+                event_payload={
+                    "next_node": next_node,
+                    "status": state.status,
+                    **transition_payload,
+                },
             )
 
             if state.status != "running":
@@ -283,6 +352,14 @@ class GraphRuntime:
             raise GraphRuntimeError(
                 "resume provider does not match the provider used to start the run: "
                 f"run={expected_provider!r}, loaded={self.provider.identity!r}"
+            )
+        expected_controller = (
+            runtime_metadata.get("controller") if isinstance(runtime_metadata, dict) else None
+        )
+        if expected_controller and expected_controller != self.controller.identity:
+            raise GraphRuntimeError(
+                "resume controller does not match the controller used to start the run: "
+                f"run={expected_controller!r}, loaded={self.controller.identity!r}"
             )
 
     def _check_budget(self, state: RunState, next_kind: NodeKind) -> None:
