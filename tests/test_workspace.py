@@ -115,6 +115,44 @@ def test_verifier_ignores_common_python_cache_files(tmp_path: Path) -> None:
     assert report["commands"][0]["passed"] is True
 
 
+def test_verifier_uses_fresh_bytecode_cache_between_same_size_repairs(
+    tmp_path: Path,
+) -> None:
+    source = _repo(tmp_path)
+    workspace = _workspace(tmp_path, source, run_id="fresh-bytecode")
+    wrong_patch = PATCH.replace("return a + b", "return a * b")
+    repair_patch = PATCH.replace("return a - b", "return a * b")
+
+    workspace.apply_patch(
+        wrong_patch,
+        idempotency_key="fresh-bytecode:apply:wrong",
+    )
+    fixed_mtime_ns = 1_700_000_000_000_000_000
+    os.utime(
+        workspace.active_root / "calc.py",
+        ns=(fixed_mtime_ns, fixed_mtime_ns),
+    )
+    first = workspace.run_tests()
+    assert first["verdict"] == "fail"
+
+    workspace.apply_patch(
+        repair_patch,
+        idempotency_key="fresh-bytecode:apply:repair",
+    )
+    # Python timestamp-based bytecode stores second-resolution mtime plus source
+    # size. The wrong and repaired lines have the same size, so restoring this
+    # mtime deterministically creates the stale-.pyc hazard the verifier must avoid.
+    os.utime(
+        workspace.active_root / "calc.py",
+        ns=(fixed_mtime_ns, fixed_mtime_ns),
+    )
+    second = workspace.run_tests()
+
+    assert second["verdict"] == "pass"
+    assert second["commands"][-1]["passed"] is True
+    assert not list(workspace.active_root.rglob("*.pyc"))
+
+
 def test_patch_policy_rejects_escape_sensitive_binary_and_renames(tmp_path: Path) -> None:
     source = _repo(tmp_path)
     with pytest.raises(PatchError, match="invalid relative path"):

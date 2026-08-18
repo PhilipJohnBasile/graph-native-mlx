@@ -1,4 +1,4 @@
-# Validation Record — v0.5.1
+# Validation Record — v0.5.2
 
 ## Portable validation environment
 
@@ -9,7 +9,7 @@
 
 ## Completed checks
 
-- 98 portable tests passed
+- 99 portable tests passed
 - all source and test modules compiled with `compileall`
 - YAML graph validated as 12 nodes, 19 edges, and 2 terminals
 - generated default graph module reproduced from the YAML source
@@ -24,6 +24,7 @@
 - traversal, sensitive-file, binary, rename, symlink, submodule, and mismatched-header rejection passed
 - verifier shell-control, mutating-Git, repository-executable spoofing, timeout, output, and tracked-mutation controls passed
 - active virtual-environment Python invocation is preserved after canonical executable validation, including the macOS/Homebrew framework-interpreter case
+- verifier Python bytecode is redirected to a fresh external cache per command; a forced same-mtime, same-size stale-`.pyc` repair regression passed
 - recent-run listing, latest-run trace resolution, and concise run/hidden-policy/verification reporting passed
 - safe run-ID paths, workspace/artifact-root confinement, same-run leases, and active-time budget semantics passed
 - direct MLX provider behavior validated through an injected backend

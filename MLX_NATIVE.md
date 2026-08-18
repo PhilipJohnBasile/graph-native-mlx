@@ -2,7 +2,7 @@
 
 ## Scope
 
-v0.5.1 keeps language generation, hidden extraction, and optional graph-policy inference in one process while retaining Git, tests, journals, permissions, and promotion in the host effect plane.
+v0.5.2 keeps language generation, hidden extraction, and optional graph-policy inference in one process while retaining Git, tests, journals, permissions, and promotion in the host effect plane.
 
 ```text
 Model plane       Qwen generation and selected hidden representations

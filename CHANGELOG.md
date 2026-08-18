@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+- Isolated Python bytecode for every verifier command with a fresh external `PYTHONPYCACHEPREFIX`, preventing same-second, same-size repairs from reusing stale `.pyc` code.
+- Disabled user-site imports inside bounded verifier commands for more reproducible repository tests.
+- Added a deterministic regression that forces the stale-bytecode condition across a failed candidate and local repair.
+- Updated the Apple-Silicon in-place upgrade helper to v0.5.2 while retaining existing environments, traces, hidden features, worktrees, and patches.
+
 ## 0.5.1
 
 - Preserved the active virtual-environment Python invocation after executable trust validation, fixing macOS/Homebrew verifier commands that otherwise lost venv site-packages.

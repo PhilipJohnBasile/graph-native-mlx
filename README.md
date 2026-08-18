@@ -8,7 +8,7 @@ The central rule is:
 
 This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, effects, verification order, budgets, retries, termination, recovery, and promotion.
 
-## v0.5.1 capabilities
+## v0.5.2 capabilities
 
 ### MLX-native model and policy path
 
@@ -34,6 +34,7 @@ This is a compound model rather than a foundation-model pretraining run. The lan
 - Transactional patch application and rollback
 - Idempotent effect ledgers with interruption recovery
 - Real verifier commands with no shell, executable allowlists, timeouts, and output limits
+- Fresh external Python bytecode cache per verifier command, preventing stale `.pyc` reuse across rapid same-size repairs
 - Tracked-workspace fingerprints before and after tests
 - Independent semantic review after deterministic verification
 - SQLite checkpoints, append-only traces, active-time budgets, and same-run process exclusion
@@ -121,27 +122,27 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.5.1.zip
-cd graph-native-model-mlx-v0.5.1
+unzip graph-native-model-mlx-v0.5.2.zip
+cd graph-native-model-mlx-v0.5.2
 
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev,mlx]'
 
-pytest
+python -m pytest -q
 ```
 
 The base package and portable tests work on non-MLX systems. The `mlx` extra is selected only on Apple Silicon.
 
-## Upgrade an existing v0.4 installation on the M5 Max
+## Upgrade an existing installation on the M5 Max
 
 The release includes a state-preserving upgrade helper. It keeps the existing virtual environment, `.graph-env`, `.graph-model` database, hidden-state artifacts, detached worktrees, and verified patches, while backing up the prior source tree.
 
-After extracting the v0.5.1 source archive:
+After extracting the v0.5.2 source archive:
 
 ```bash
-cd graph-native-model-mlx-v0.5.1
+cd graph-native-model-mlx-v0.5.2
 ./scripts/upgrade-mac-in-place.sh
 ```
 
@@ -186,7 +187,7 @@ graph-model mlx-doctor
 graph-model mlx-doctor --load-model
 ```
 
-v0.5.1 includes one evidence-producing qualification command:
+v0.5.2 includes one evidence-producing qualification command:
 
 ```bash
 graph-model qualify-mac \
@@ -242,7 +243,7 @@ When an absolute Python command is the active virtual-environment interpreter, t
 
 ### Execution boundary
 
-Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.1 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
+Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.2 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
 
 ## Inspect, promote, clean up, and resume
 

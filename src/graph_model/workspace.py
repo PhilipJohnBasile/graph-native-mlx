@@ -1594,6 +1594,12 @@ def run_bounded_command(
     environment = _minimal_environment(extra_env, cwd=root)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="graph-model-command-") as temp_dir:
+        # Keep verifier bytecode outside the repository and make every command use
+        # a fresh cache namespace. Timestamp-based .pyc validation can otherwise
+        # reuse stale code when a repair changes one same-sized line within the
+        # same second (for example, ``a * b`` to ``a + b``).
+        environment["PYTHONPYCACHEPREFIX"] = str(Path(temp_dir) / "python-bytecode")
+        environment["PYTHONNOUSERSITE"] = "1"
         stdout_path = Path(temp_dir) / "stdout.log"
         stderr_path = Path(temp_dir) / "stderr.log"
         timed_out = False
