@@ -8,7 +8,7 @@ The central rule is:
 
 This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, effects, verification order, budgets, retries, termination, recovery, and promotion.
 
-## v0.5 capabilities
+## v0.5.1 capabilities
 
 ### MLX-native model and policy path
 
@@ -121,8 +121,8 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.5.0.zip
-cd graph-native-model-mlx-v0.5.0
+unzip graph-native-model-mlx-v0.5.1.zip
+cd graph-native-model-mlx-v0.5.1
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -133,6 +133,19 @@ pytest
 ```
 
 The base package and portable tests work on non-MLX systems. The `mlx` extra is selected only on Apple Silicon.
+
+## Upgrade an existing v0.4 installation on the M5 Max
+
+The release includes a state-preserving upgrade helper. It keeps the existing virtual environment, `.graph-env`, `.graph-model` database, hidden-state artifacts, detached worktrees, and verified patches, while backing up the prior source tree.
+
+After extracting the v0.5.1 source archive:
+
+```bash
+cd graph-native-model-mlx-v0.5.1
+./scripts/upgrade-mac-in-place.sh
+```
+
+The helper reinstalls the editable package, runs the complete portable suite, validates the graph, displays retained runs, writes a concise report for the latest completed execution, and executes `qualify-mac` against the exact configured MLX model.
 
 ## Configure the MLX model
 
@@ -173,7 +186,7 @@ graph-model mlx-doctor
 graph-model mlx-doctor --load-model
 ```
 
-v0.5 adds one evidence-producing qualification command:
+v0.5.1 includes one evidence-producing qualification command:
 
 ```bash
 graph-model qualify-mac \
@@ -225,17 +238,39 @@ graph-model run \
 
 Commands are parsed with `shlex`, executed without a shell, resolved through a sanitized `PATH`, restricted to an allowlist, bounded by time and output limits, and stopped on the first failure.
 
+When an absolute Python command is the active virtual-environment interpreter, the runtime validates its canonical target but preserves the venv invocation path. This is required on macOS/Homebrew so `pyvenv.cfg` and environment site-packages remain active during verification.
+
 ### Execution boundary
 
-Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
+Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.1 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
 
 ## Inspect, promote, clean up, and resume
 
+List recent executions without querying SQLite manually:
+
+```bash
+graph-model runs --limit 20
+graph-model runs --status completed
+```
+
+Show the latest completed run as a concise evidence report:
+
+```bash
+graph-model report --latest --latest-status completed
+# Equivalent summary through the trace command:
+graph-model trace --latest --latest-status completed --summary
+```
+
+The concise report includes the path, token and call metrics, unique projected Qwen artifacts, decision sources, verifier commands and verdicts, semantic review, and verified-patch identity. Full append-only events remain available when needed:
+
 ```bash
 graph-model trace --run-id fix-auth-regression-001
+```
 
+Promote or clean up an identified run explicitly:
+
+```bash
 graph-model apply-result --run-id fix-auth-regression-001
-
 graph-model cleanup --run-id fix-auth-regression-001
 ```
 

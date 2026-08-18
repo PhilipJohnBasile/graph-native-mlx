@@ -358,9 +358,65 @@ def _cleanup_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _selected_run_id(args: argparse.Namespace, store: SQLiteRunStore) -> str | None:
+    run_id = getattr(args, "run_id", None)
+    if isinstance(run_id, str) and run_id:
+        return run_id
+    if getattr(args, "latest", False):
+        latest = store.latest_run(status=getattr(args, "latest_status", None))
+        return latest.run_id if latest is not None else None
+    return None
+
+
+def _runs_command(args: argparse.Namespace) -> int:
+    from .run_reporting import list_run_summaries
+
+    try:
+        rows = list_run_summaries(
+            _store(args.db),
+            limit=args.limit,
+            status=args.status,
+        )
+    except ValueError as exc:
+        print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(rows, indent=2, sort_keys=True))
+    return 0 if rows else 1
+
+
+def _report_command(args: argparse.Namespace) -> int:
+    from .run_reporting import build_run_report
+
+    store = _store(args.db)
+    run_id = _selected_run_id(args, store)
+    if run_id is None:
+        print(json.dumps({"status": "failed", "error": "no matching run found"}, indent=2))
+        return 1
+    try:
+        report = build_run_report(store, run_id)
+    except KeyError as exc:
+        print(json.dumps({"status": "failed", "error": str(exc)}, indent=2))
+        return 1
+    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    return 0
+
+
 def _trace_command(args: argparse.Namespace) -> int:
-    events = _store(args.db).events(args.run_id)
-    print(json.dumps(events, indent=2, sort_keys=True))
+    store = _store(args.db)
+    run_id = _selected_run_id(args, store)
+    if run_id is None:
+        print(json.dumps({"status": "failed", "error": "no matching run found"}, indent=2))
+        return 1
+    if getattr(args, "summary", False):
+        from .run_reporting import build_run_report
+
+        print(json.dumps(build_run_report(store, run_id), indent=2, sort_keys=True, default=str))
+        return 0
+    events = store.events(run_id)
+    if args.latest:
+        print(json.dumps({"run_id": run_id, "events": events}, indent=2, sort_keys=True))
+    else:
+        print(json.dumps(events, indent=2, sort_keys=True))
     return 0 if events else 1
 
 
@@ -782,8 +838,26 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--run-id", required=True)
     _add_runtime_options(resume)
 
+    runs = subparsers.add_parser("runs", help="list recent graph executions")
+    runs.add_argument("--db")
+    runs.add_argument("--limit", type=int, default=20)
+    runs.add_argument("--status", choices=("running", "completed", "failed"))
+
+    report = subparsers.add_parser(
+        "report", help="show a concise run, hidden-policy, patch, and verification report"
+    )
+    report_target = report.add_mutually_exclusive_group(required=True)
+    report_target.add_argument("--run-id")
+    report_target.add_argument("--latest", action="store_true")
+    report.add_argument("--latest-status", choices=("running", "completed", "failed"))
+    report.add_argument("--db")
+
     trace = subparsers.add_parser("trace", help="inspect an execution trace")
-    trace.add_argument("--run-id", required=True)
+    trace_target = trace.add_mutually_exclusive_group(required=True)
+    trace_target.add_argument("--run-id")
+    trace_target.add_argument("--latest", action="store_true")
+    trace.add_argument("--latest-status", choices=("running", "completed", "failed"))
+    trace.add_argument("--summary", action="store_true")
     trace.add_argument("--db")
 
     export = subparsers.add_parser("export", help="export router training records")
@@ -885,6 +959,10 @@ def main() -> None:
         code = asyncio.run(_qualify_mac_command(args))
     elif args.command == "resume":
         code = asyncio.run(_resume_command(args))
+    elif args.command == "runs":
+        code = _runs_command(args)
+    elif args.command == "report":
+        code = _report_command(args)
     elif args.command == "trace":
         code = _trace_command(args)
     elif args.command == "export":

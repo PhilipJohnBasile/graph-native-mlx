@@ -1,4 +1,4 @@
-# Validation Record — v0.5.0
+# Validation Record — v0.5.1
 
 ## Portable validation environment
 
@@ -9,7 +9,7 @@
 
 ## Completed checks
 
-- 92 portable tests passed
+- 98 portable tests passed
 - all source and test modules compiled with `compileall`
 - YAML graph validated as 12 nodes, 19 edges, and 2 terminals
 - generated default graph module reproduced from the YAML source
@@ -23,6 +23,8 @@
 - patch application replay, interruption recovery, transactional rollback, and declared-path enforcement passed
 - traversal, sensitive-file, binary, rename, symlink, submodule, and mismatched-header rejection passed
 - verifier shell-control, mutating-Git, repository-executable spoofing, timeout, output, and tracked-mutation controls passed
+- active virtual-environment Python invocation is preserved after canonical executable validation, including the macOS/Homebrew framework-interpreter case
+- recent-run listing, latest-run trace resolution, and concise run/hidden-policy/verification reporting passed
 - safe run-ID paths, workspace/artifact-root confinement, same-run leases, and active-time budget semantics passed
 - direct MLX provider behavior validated through an injected backend
 - model/tokenizer residency, explicit close, post-close rejection, loader-signature compatibility, chat-template fallback, and complete-JSON extraction passed
@@ -77,6 +79,7 @@ The release process additionally validates:
 - installed `graph-model --help`
 - installed `graph-model validate`
 - installed graph optimization and bundle verification commands
+- installed `graph-model runs`, `graph-model report`, and `graph-model trace --latest --summary` run-discovery and concise-evidence commands
 - release-wide removal scan for the withdrawn job-application material
 - SHA-256 hashes for the source archive and wheel
 

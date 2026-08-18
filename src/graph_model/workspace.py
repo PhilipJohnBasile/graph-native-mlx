@@ -1518,11 +1518,14 @@ def parse_bounded_command(
     system_match = (
         Path(system_match_raw).resolve(strict=True) if system_match_raw is not None else None
     )
-    current_python = Path(sys.executable).resolve(strict=True)
+    current_python_invocation = Path(sys.executable).expanduser()
+    current_python = current_python_invocation.resolve(strict=True)
+    execution_path: Path | None = None
 
     if executable.startswith("./") or "/" in executable:
         if executable_path.is_absolute():
-            resolved = executable_path.resolve(strict=True)
+            requested = executable_path.absolute()
+            resolved = requested.resolve(strict=True)
             trusted = resolved in allowed_paths or (
                 name_allowed
                 and (
@@ -1534,6 +1537,17 @@ def parse_bounded_command(
                 raise CommandPolicyError(
                     f"absolute executable is not a trusted allowlisted path: {resolved}"
                 )
+
+            # Validate against the canonical interpreter, but preserve the active
+            # virtual-environment invocation path. On macOS, executing a resolved
+            # Homebrew framework binary directly bypasses pyvenv.cfg and loses the
+            # virtual environment's site-packages.
+            if (
+                python_allowed
+                and resolved == current_python
+                and requested == current_python_invocation.absolute()
+            ):
+                execution_path = current_python_invocation.absolute()
         else:
             unresolved = root / executable_path
             resolved = unresolved.resolve(strict=True)
@@ -1555,7 +1569,7 @@ def parse_bounded_command(
 
     if not resolved.is_file():
         raise CommandPolicyError(f"executable is not a file: {resolved}")
-    argv[0] = str(resolved)
+    argv[0] = str(execution_path or resolved)
 
     if basename == "git":
         subcommand = argv[1] if len(argv) > 1 else None

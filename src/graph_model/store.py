@@ -234,9 +234,25 @@ class SQLiteRunStore:
             for row in rows
         ]
 
-    def list_runs(self) -> list[RunState]:
+    def list_runs(
+        self,
+        *,
+        limit: int | None = None,
+        status: str | None = None,
+    ) -> list[RunState]:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be >= 1")
+        if status is not None and status not in {"running", "completed", "failed"}:
+            raise ValueError(f"unsupported run status {status!r}")
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT state_json FROM runs ORDER BY updated_at DESC"
             ).fetchall()
-        return [RunState.model_validate_json(row["state_json"]) for row in rows]
+        states = [RunState.model_validate_json(row["state_json"]) for row in rows]
+        if status is not None:
+            states = [state for state in states if state.status == status]
+        return states[:limit] if limit is not None else states
+
+    def latest_run(self, *, status: str | None = None) -> RunState | None:
+        runs = self.list_runs(limit=1, status=status)
+        return runs[0] if runs else None

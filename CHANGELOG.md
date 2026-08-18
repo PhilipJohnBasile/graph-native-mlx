@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Preserved the active virtual-environment Python invocation after executable trust validation, fixing macOS/Homebrew verifier commands that otherwise lost venv site-packages.
+- Added `graph-model runs` to list recent run IDs, statuses, paths, routes, and tasks without querying SQLite manually.
+- Added `graph-model trace --latest`, `trace --summary`, and `graph-model report` for concise run, hidden-state, verifier, and patch evidence without manual SQLite inspection.
+- Added an in-place Apple-Silicon upgrade helper that preserves the virtual environment, `.graph-env`, run database, hidden-state artifacts, worktrees, and patches.
+- Added regression coverage for macOS virtual-environment execution and latest-run CLI resolution.
+
 ## 0.5.0
 
 - Added `graph-model qualify-mac` for one-command Apple Silicon/Metal, model-load, structured-generation, Qwen hidden-capture, controller, and memory-telemetry evidence.

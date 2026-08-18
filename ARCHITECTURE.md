@@ -16,7 +16,7 @@ The model and learned policy are advisory. The effect plane remains authoritativ
 
 ## Default graph
 
-v0.5 retains the 12-node, 19-edge repository graph introduced in v0.3.
+v0.5.1 retains the 12-node, 19-edge repository graph introduced in v0.3.
 
 | Node | Kind | Responsibility |
 |---|---|---|
@@ -183,7 +183,7 @@ A resumed run must match its stored provider and controller identity. Changing m
 
 The M5 qualification command checks platform, immutable model identity, model load, capability discovery, hidden-feature determinism, repeated-generation behavior, and MLX memory counters. It writes a content-hashed report.
 
-An exposed `mtp_forward` method is treated as capability only. The direct v0.5 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
+An exposed `mtp_forward` method is treated as capability only. The direct v0.5.1 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
 
 ## Promotion boundary
 

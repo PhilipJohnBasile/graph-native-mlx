@@ -2,7 +2,7 @@
 
 ## Scope
 
-v0.5 keeps language generation, hidden extraction, and optional graph-policy inference in one process while retaining Git, tests, journals, permissions, and promotion in the host effect plane.
+v0.5.1 keeps language generation, hidden extraction, and optional graph-policy inference in one process while retaining Git, tests, journals, permissions, and promotion in the host effect plane.
 
 ```text
 Model plane       Qwen generation and selected hidden representations
@@ -136,7 +136,7 @@ The controller identity includes mode and thresholds, preventing a resumed run f
 
 ## Qualification
 
-`graph-model qualify-mlx` uses one resident provider to collect:
+`graph-model qualify-mac` uses one resident provider to collect:
 
 - platform and package versions
 - Metal/device information

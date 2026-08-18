@@ -104,6 +104,6 @@ The SQLite database defaults to `.graph-model/runs.sqlite3` relative to the comm
 
 ## Security model
 
-v0.5 protects the source checkout and constrains model-proposed effects, but it assumes the repository itself is trusted. A malicious test suite can still access anything available to the current OS user.
+v0.5.1 protects the source checkout and constrains model-proposed effects, but it assumes the repository itself is trusted. A malicious test suite can still access anything available to the current OS user.
 
 For untrusted repositories, run the entire process inside a disposable VM or container with restricted credentials, network, filesystem mounts, and resource limits.

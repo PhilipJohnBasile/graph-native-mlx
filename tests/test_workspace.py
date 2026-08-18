@@ -322,3 +322,14 @@ def test_cleanup_removes_dirty_worktree_but_retains_patch_for_promotion(
     promoted = workspace.promote_verified_patch(manifest["path"], manifest["sha256"])
     assert promoted["status"] == "applied"
     assert (source / "calc.py").read_text(encoding="utf-8").endswith("return a + b\n")
+
+
+def test_command_policy_preserves_active_python_invocation_path(tmp_path: Path) -> None:
+    source = _repo(tmp_path)
+    parsed = parse_bounded_command(
+        f"{sys.executable} -m pytest -q",
+        cwd=source,
+        allowed_commands=["python", "python3"],
+    )
+
+    assert parsed[0] == str(Path(sys.executable).absolute())
