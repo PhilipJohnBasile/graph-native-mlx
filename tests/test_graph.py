@@ -8,7 +8,8 @@ def test_default_graph_is_validated() -> None:
     graph = load_default_graph()
     assert graph.start == "intake"
     assert graph.terminals == {"finish", "abort"}
-    assert len(graph.nodes) == 11
+    assert len(graph.nodes) == 12
+    assert "apply" in graph.nodes
     assert any(edge.target == "repair" for edge in graph.edges)
     assert next(edge for edge in graph.edges if edge.source == "plan" and edge.target == "plan_check").max_traversals == 2
     assert next(edge for edge in graph.edges if edge.source == "tests" and edge.target == "review").max_traversals == 3

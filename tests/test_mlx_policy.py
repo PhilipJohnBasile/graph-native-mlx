@@ -14,7 +14,7 @@ def test_policy_config_is_bound_to_graph_schema(tmp_path: Path) -> None:
     loaded = GraphPolicyConfig.load(path)
     loaded.validate(tables)
     assert loaded.hidden_size == 96
-    assert loaded.edge_count == 16
+    assert loaded.edge_count == 19
     assert loaded.graph_schema_hash == tables.schema_hash
 
 

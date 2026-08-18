@@ -33,7 +33,9 @@ async def test_fast_path_completes_without_plan(tmp_path: Path) -> None:
     assert state.status == "completed"
     assert state.data["route"] == "fast"
     assert "plan" not in state.completed_nodes
-    assert state.completed_nodes == ["intake", "context", "implement", "tests", "review", "finish"]
+    assert state.completed_nodes == [
+        "intake", "context", "implement", "apply", "tests", "review", "finish"
+    ]
 
 
 @pytest.mark.asyncio
@@ -126,3 +128,40 @@ async def test_call_budget_is_checked_for_the_next_node_kind(tmp_path: Path) -> 
     state = store.list_runs()[0]
     assert state.completed_nodes == ["intake", "context"]
     assert state.status == "failed"
+
+
+def test_store_rejects_concurrent_execution_of_same_run(tmp_path: Path) -> None:
+    from graph_model.store import RunAlreadyActive
+
+    store = SQLiteRunStore(tmp_path / "runs.sqlite3")
+    with store.run_lock("same-run"):
+        with pytest.raises(RunAlreadyActive, match="already active"):
+            with store.run_lock("same-run"):
+                pass
+
+
+def test_time_budget_uses_accumulated_active_runtime_not_idle_wall_time() -> None:
+    import time
+
+    from graph_model.models import RunState
+    from graph_model.runtime import budget_violations
+
+    graph = load_default_graph()
+    state = RunState.new(
+        graph=graph,
+        task="quick fix",
+        budget=Budget(max_seconds=2.0),
+        run_id="elapsed-budget",
+    )
+    state.started_at = time.time() - 10_000
+    state.metrics.elapsed_seconds = 1.0
+
+    assert budget_violations(state, next_kind=graph.nodes[state.current_node].kind) == []
+
+    state.metrics.elapsed_seconds = 2.0
+    assert any(
+        violation.startswith("seconds ")
+        for violation in budget_violations(
+            state, next_kind=graph.nodes[state.current_node].kind
+        )
+    )

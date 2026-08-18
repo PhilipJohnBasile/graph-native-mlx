@@ -2,82 +2,92 @@
 
 ## Scope
 
-Version 0.2 is the first deployable MLX checkpoint. It puts two computational paths in the same process:
+Version 0.3 keeps the model and graph-policy computation in one process while adding a real repository effect plane.
 
-1. Qwen node generation through `mlx_lm.load` and `mlx_lm.stream_generate`.
-2. Graph route, stop, and edge selection through MLX tensor operations.
+1. Qwen node generation runs through `mlx_lm.load` and `mlx_lm.stream_generate`.
+2. Route, stop, and edge selection can run through MLX tensors and optional learned sidecar heads.
+3. Git mutation, test execution, checkpoints, permissions, and promotion remain in the host runtime.
 
-The durable executor remains outside MLX. This is intentional. Tensor evaluation cannot commit a filesystem mutation, journal a remote side effect, or authorize a deployment.
+Tensor evaluation cannot provide a durable transaction log or safely authorize an external side effect, so this boundary is intentional.
 
-## Authority boundary
-
-The transition pipeline is ordered and non-bypassable:
+## Transition pipeline
 
 ```text
-compiled graph row
-      │
-      ▼
-runtime condition evaluation
-      │
-      ▼
-edge traversal-limit filtering
-      │
-      ▼
-optional learned residual logits
-      │
-      ▼
+compiled graph structure
+        │
+runtime predicates and traversal caps
+        │
+optional policy residual logits
+        │
 MLX hard mask + softmax + argmax
-      │
-      ▼
+        │
 runtime validates selected edge again
-      │
-      ▼
-checkpointed transition commit
+        │
+durable checkpoint commit
 ```
 
-The learned policy never receives permission to create an edge. It only ranks the candidate set produced by the graph and runtime.
+The learned policy cannot unmask an invalid transition.
 
 ## Source map
 
 ```text
 src/graph_model/
-  controller.py                    controller protocol and deterministic fallback
-  runtime.py                       durable authority and transition validation
-  provider.py                      provider protocol and JSON extraction
+  runtime.py                       graph authority, active budgets, run lease
+  store.py                         SQLite checkpoints, traces, same-run exclusion
+  workspace.py                     Git worktrees, patch transaction, verifier runner
+  operators.py                     typed graph-node implementations
   graphs/coding_supergraph.yaml    editable graph source
 
   mlx_native/
-    provider.py                    resident in-process MLX-LM provider
+    provider.py                    resident direct MLX-LM provider
     graph_tables.py                graph compiler and schema hashing
-    generated_coding_graph.py      generated immutable graph constants
-    decision.py                    MLX hard mask, softmax, and argmax
-    features.py                    explicit task/run-state feature vector
-    policy.py                      MLX route/edge/stop/value/cost sidecar
-    controller.py                  graph-controller integration
-    training_data.py               trace-to-policy-dataset export
+    generated_coding_graph.py      immutable generated constants
+    decision.py                    MLX masked softmax and argmax
+    features.py                    explicit 62-value policy vector
+    policy.py                      route/edge/stop/value/cost network
+    controller.py                  hard-mask controller integration
+    training_data.py               trace-to-policy JSONL export
     trainer.py                     multi-task MLX policy trainer
-    doctor.py                      target-Mac diagnostics and model-load check
+    doctor.py                      Mac and model-load diagnostics
 ```
 
-## Generated graph tables
+## Direct MLX-LM provider
 
-`graph-model compile-graph` validates the YAML graph and emits stable constants:
+`MLXLocalProvider`:
 
-- sorted node IDs
-- sorted edge keys
-- edge source and target indices
-- edge priorities
-- edge traversal limits
-- condition expressions
-- a per-node structural edge mask
-- terminal-node mask
-- deterministic graph-schema SHA-256
+- keeps one model and tokenizer resident
+- accepts a local path or Hugging Face repository ID
+- supports revision pinning across compatible MLX-LM loader signatures
+- applies the tokenizer chat template when available
+- falls back to explicit system/user role delimiters
+- uses `make_sampler` and `stream_generate`
+- serializes generation because decoding cache state is mutable
+- runs blocking generation in a worker thread
+- extracts the final complete JSON object from surrounding reasoning text
+- records prompt and completion token counts
+- defaults to 8,192 output tokens for coding patches
 
-The generated module is checked against the loaded graph at controller startup. Any graph edit that is not followed by regeneration causes a schema mismatch instead of silently running stale masks.
+The provider does not enable MTP/speculative decoding in v0.3. MTP may later accelerate text generation inside a node, but it must not own graph transitions, idempotency, or recovery.
+
+## Compiled graph tables
+
+`graph-model compile-graph` emits:
+
+- stable sorted node IDs
+- stable edge keys
+- source/target index arrays
+- edge priorities and traversal limits
+- condition strings
+- per-node structural edge masks
+- terminal mask
+- graph metadata
+- deterministic schema SHA-256
+
+The generated module validates itself against the loaded YAML graph. Schema drift fails before execution.
 
 ## MLX decision backend
 
-The production backend performs:
+The production decision path is equivalent to:
 
 ```python
 values = mx.array(logits, dtype=mx.float32)
@@ -88,127 +98,79 @@ selected = mx.argmax(probabilities, axis=-1)
 mx.eval(probabilities, selected)
 ```
 
-At least one mask entry must be true. Invalid dimensions and all-false masks fail before evaluation.
+All-false masks and dimension mismatches fail explicitly.
 
-The portable test backend implements the same masked-softmax/argmax semantics in Python. It is injected explicitly in tests; `--controller mlx` does not silently fall back to it.
+## Policy sidecar
 
-## Sidecar policy
-
-The v0.2 sidecar consumes an explicit feature vector, not Qwen hidden states.
+The default graph uses:
 
 ```text
 16 task features
-28 run-state features
-11 one-hot node features
+34 run/repository-state features
+12 one-hot node features
 ---------------------------
-55 inputs for the default graph
+62 total inputs
 ```
 
-It emits:
+Outputs:
 
 ```text
 3 route residual logits
-16 edge residual logits
+19 edge residual logits
 4 stop residual logits
 1 success logit
-3 cost values
+3 positive cost estimates
 ```
 
-The success output is exposed through a sigmoid. Cost outputs are exposed through softplus. Route, edge, and stop values remain logits because they are combined with hardcoded priors before masking.
+The sidecar config binds graph name, version, schema hash, input size, and output dimensions. Controller identity includes SHA-256 fingerprints of policy weights and config.
 
-Policy configuration is bound to:
+## Repository-aware features
 
-- graph name
-- graph version
+In addition to budget and route state, the policy sees indicators for:
+
+- repository workspace presence
+- pending patch presence
+- candidate presence
+- apply-report presence
+- apply pass/fail
+- test-report presence
+- test-induced workspace mutation
+- review and diagnosis presence
+
+Structural safety remains hardcoded even after policy training.
+
+## Training data
+
+`graph-model export-mlx-policy` emits route and transition records with:
+
+- exact feature vector
 - graph schema hash
-- input size
-- route, edge, and stop output dimensions
+- selected labels
+- allowed edge and stop masks
+- terminal reward
+- normalized token, active-time, and tool-call cost targets
 
-Controller identity also includes SHA-256 fingerprints of the policy weights and config. A checkpoint cannot resume with different sidecar bytes under the same filename.
+The included trainer combines route cross-entropy, masked edge cross-entropy, masked stop cross-entropy, success-value MSE, and cost MSE.
 
-## Direct MLX-LM provider
+Behavioral cloning should be treated as initialization. Stronger training should use held-out evaluator scores, graph-search winners, failed alternatives, and explicit cost-aware preferences.
 
-`MLXLocalProvider`:
+## Current model-level boundary
 
-- loads the model and tokenizer once
-- accepts a local model path or Hugging Face repository ID
-- supports a pinned Hugging Face revision across MLX-LM 0.31.3 and newer loader signatures
-- applies the tokenizer chat template when usable
-- falls back to explicit system/user role delimiters when the template fails
-- builds a sampler through `mlx_lm.sample_utils.make_sampler`
-- consumes streamed text segments from `stream_generate`
-- records prompt and completion token counts
-- extracts the final complete JSON object from reasoning or surrounding prose
-- serializes generation access because decoding mutates model/cache state
-- moves blocking generation into a worker thread so the async graph runtime remains responsive
+Implemented:
 
-The provider intentionally does not enable speculative decoding or an MTP-specific path in v0.2. Establish graph correctness first; then benchmark MTP as a node-generation optimization.
-
-## Durable state and resume
-
-SQLite commits each completed node together with:
-
-- canonical input hash
-- node result
-- state delta and artifacts
-- stop decision
-- selected edge
-- candidate masks
-- provider identity
-- controller identity
-
-A resume validates graph, configured provider identity, controller kind, graph hash, policy fingerprints, and policy scale before continuing. Local or remote model repositories should still be version-pinned for reproducible production runs; a repository name alone is a configuration identity, not a cryptographic hash of 27B model weights.
-
-## Policy-data format
-
-`graph-model export-mlx-policy` emits JSONL records with:
-
-```json
-{
-  "decision_type": "transition",
-  "features": [0.0],
-  "route_label": -1,
-  "edge_label": 4,
-  "stop_label": 0,
-  "allowed_edge_mask": [false, true],
-  "allowed_stop_mask": [true, false, false, false],
-  "reward": 1.0,
-  "cost_target": [0.12, 0.08, 0.20]
-}
-```
-
-`-1` means that a label is not applicable to that record. Masked cross-entropy ignores it.
-
-The included trainer minimizes:
-
-```text
-route cross-entropy
-+ masked edge cross-entropy
-+ masked stop cross-entropy
-+ 0.5 × success-value MSE
-+ 0.25 × normalized-cost MSE
-```
-
-Behavioral cloning is only a bootstrap. A stronger policy dataset should retain graph-search winners, held-out evaluator results, cost-aware preferences, and explicit failed alternatives.
-
-## Current boundary and next stage
-
-Implemented now:
-
-- direct resident MLX-LM backbone
-- compiled graph schema and masks
-- MLX route/stop/edge decisions
-- trainable MLX sidecar policy
-- durable external execution
-- policy trace export and training
+- resident direct MLX-LM backbone
+- compiled hard graph masks
+- optional trainable MLX policy
+- real repository workspace and verifier integration
+- durable external effects and policy trace export
 
 Not yet implemented:
 
-- a Qwen architecture hook returning selected hidden states
-- joint text-plus-policy LoRA training
+- Qwen hidden-state extraction for policy fusion
+- joint LM/route/edge/stop/value/cost LoRA training
 - MTP/speculative generation integration
-- sandboxed repository tools that mutate and test a real checkout
+- hostile-code process sandboxing
 - offline MCTS graph promotion
-- inference-time validated region grafting
+- validated inference-time subgraph grafting
 
-The next model-level milestone is hidden-state fusion. It should append a selected Qwen representation to the existing explicit features while preserving the same hard graph mask and external transaction boundary.
+The next model-level step is to append a selected Qwen hidden representation to the explicit policy vector while retaining the same hard graph mask and external transaction boundary.

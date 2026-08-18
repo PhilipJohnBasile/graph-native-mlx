@@ -1,218 +1,163 @@
-# Graph-Native MLX Architecture
+# Architecture
 
-## Thesis
+## Design objective
 
-A loop is not inherently wrong. An unbounded loop with implicit state, self-judged progress, replayed side effects, and no terminal policy is wrong.
+Replace an open-ended agent retry loop with a durable, inspectable, graph-controlled system in which every operation has a name, state contract, allowed successors, retry cap, evidence boundary, and checkpoint.
 
-This system treats the workflow as a versioned executable control model:
-
-- **nodes** are typed operations
-- **edges** are the only legal transitions
-- **state** is explicit and checkpointed
-- **verifiers** produce evidence rather than vague reflection
-- **cycles** have traversal limits, progress checks, and abort paths
-- **the language model proposes work but does not own control flow**
-
-The graph is the control plane. A loop is a named, bounded, observable back-edge.
-
-## Production shape
+The system is intentionally split into three planes.
 
 ```text
-request
-  │
-  ▼
-resident Qwen MLX backbone ───────────────► typed node artifact
-  │                                                │
-  │                                                ▼
-  │                                    runtime conditions and limits
-  │                                                │
-  ▼                                                ▼
-explicit task/run-state features ───────► MLX policy residuals
-                                                   │
-compiled structural graph mask ────────────────────┤
-                                                   ▼
-                                      hard-masked MLX decision
-                                                   │
-                                                   ▼
-                                      durable executor commits
-                                      tools / tests / checkpoint
+Model plane      Qwen/MLX generates typed proposals and semantic judgments
+Policy plane     validated graph + optional learned MLX decision heads
+Effect plane     Git, tests, journals, permissions, promotion, cleanup
 ```
 
-The model and policy may rank valid actions. Only the runtime can commit a transition or terminal status.
+The model and learned policy are advisory. The effect plane remains authoritative.
 
-## Four learning layers
+## Default graph
 
-1. **Node policy** — how a planner, executor, verifier, retriever, or repair node behaves.
-2. **Route policy** — which validated task-level path should run.
-3. **Transition policy** — which condition-valid edge is best and whether expected progress justifies continuing.
-4. **Graph policy** — which nodes and edges should be promoted for a task family after offline evaluation.
+The v0.3 graph contains 12 nodes and 19 edges.
 
-Version 0.2 implements the first three control interfaces. Graph-structure optimization remains offline and bounded.
+| Node | Kind | Responsibility |
+|---|---|---|
+| `intake` | router | Select `fast`, `deep`, or `repair` route |
+| `context` | tool | Prepare/resume worktree and collect bounded repository context |
+| `plan` | LLM | Produce typed implementation plan |
+| `plan_check` | verifier | Reject unusable plans; allow one revision |
+| `implement` | LLM | Propose a unified diff; no mutation authority |
+| `apply` | tool | Validate and transactionally apply pending patch |
+| `tests` | verifier | Run bounded deterministic commands and fingerprint integrity check |
+| `review` | LLM | Independently assess objective satisfaction after tests pass |
+| `diagnose` | LLM | Convert exact apply/test/review evidence into a local diagnosis |
+| `repair` | LLM | Propose one patch against the current worktree |
+| `finish` | final | Export cumulative verified patch and evidence |
+| `abort` | final | Export failed patch/evidence after bounded paths are exhausted |
 
-## Typed run state
+Repairs return to `apply`, not directly to `tests`. Every proposed mutation therefore crosses the same validation and idempotency gate.
 
-Each run records:
-
-- run ID, graph name, immutable version, and schema hash
-- task, route, difficulty estimate, and current node
-- completed-node path and edge-traversal counts
-- artifacts, verifier evidence, and repair state
-- LLM-call, tool-call, token, time, step, and no-progress budgets
-- a repeated-progress signature
-- stable idempotency keys for external effects
-- provider and controller identities
-- policy config and weights fingerprints when a sidecar is active
-
-A node returns a `NodeResult` containing a state delta, artifacts, optional output, verdict, progress key, token accounting, and notes. It cannot name or jump to the next node.
-
-## Compiled graph authority
-
-The editable YAML graph is compiled into immutable Python tables. The compiler emits stable IDs, adjacency rows, traversal limits, terminal masks, and a deterministic SHA-256 over the normalized graph.
-
-Transition selection has two masks:
-
-1. **Structural mask:** an edge must originate at the current node in the compiled graph.
-2. **Runtime mask:** its predicate must pass and its traversal count must remain below the cap.
-
-Optional policy logits are added before the hard mask. The runtime validates the selected edge against the candidate set again before committing it. A policy cannot create a node, unmask an edge, bypass a verifier, or raise its own budget.
-
-## Default coding supergraph
-
-The graph supports three routes:
-
-- **fast:** context → implement → tests → semantic review
-- **deep:** context → plan → plan verifier → implement → tests → semantic review
-- **repair:** planned execution followed by bounded diagnose/repair when evidence rejects the candidate
-
-The plan can be revised within its configured edge cap. Candidate repair is also bounded. Exhaustion reaches an explicit `abort` terminal rather than continuing until a model happens to declare success.
-
-## Verifier ordering
-
-Cheap deterministic verification precedes expensive semantic review:
-
-1. schema and output-shape checks
-2. compilation, unit tests, static analysis, or domain constraints
-3. independent semantic review
-4. human approval for configured high-risk effects
-
-The executor cannot mark its own work as verified. A failed verifier must leave evidence that a diagnose node can convert into targeted repair state.
-
-## MLX-native model boundary
-
-### Inside MLX
-
-- Qwen language generation through MLX-LM
-- explicit task/run-state feature tensors
-- route, edge, stop, success-value, and cost heads
-- hard masking, softmax, and argmax
-- policy-weight inference and training
-
-### Outside MLX
-
-- SQLite or Restate journal
-- shell commands and test processes
-- filesystem, GitHub, database, email, and deployment effects
-- secrets, permissions, and human approvals
-- idempotency records
-- final transition commit
-
-A tensor graph is not a transaction log. External durability is therefore a required part of the model system, not an incidental wrapper.
-
-## Durability model
-
-The local runner writes atomic SQLite checkpoints using canonical node-input hashes. A completed cacheable node can be replayed without re-running model or tool work.
-
-There remains a commit gap around an external operation: a process can fail after a remote system accepts the request but before local success is recorded. Side-effecting tools must accept stable idempotency keys.
-
-The optional Restate adapter journals node actions and replays completed results during recovery. Temporal can serve the same architectural role in another deployment.
-
-## Implemented model roadmap
-
-### Stage 1 — Direct MLX compound model: implemented
-
-- One resident Qwen model/tokenizer via `mlx_lm.load`
-- In-process streamed generation
-- External typed graph and durable checkpointing
-- Deterministic verifier gates
-
-### Stage 2 — MLX graph-policy sidecar: implemented
-
-- Explicit task and run-state features
-- Route, edge, stop, value, and cost heads
-- MLX hard masks
-- Trace export and multi-task trainer
-- Graph-schema-bound Safetensors
-
-### Stage 3 — Hidden-state fusion and graph-aware LoRA: next
-
-Add a Qwen-specific, tested hidden-state hook and concatenate selected hidden representations with explicit graph features. Train the controller and a small LoRA to:
-
-- emit concise typed node outputs
-- preserve evidence across nodes
-- distinguish claims from verifier proof
-- predict calibrated progress and cost
-- avoid a back-edge when state has not materially changed
-
-A candidate objective is:
+## Repository transaction
 
 ```text
-L = L_text
-  + α CE(route)
-  + β CE(masked_edge)
-  + γ CE(masked_stop)
-  + δ BCE(success)
-  + ε Huber(cost)
-  + ζ pairwise_rank(winning_trace, losing_trace)
+model JSON patch proposal
+          │
+          ▼
+normalize fenced/plain diff
+          │
+          ▼
+validate byte count, file count, path policy, diff-header consistency
+          │
+          ▼
+write immutable patch artifact
+          │
+          ▼
+write operation intent ledger
+          │
+          ▼
+git apply --check
+          │
+          ▼
+apply patch in detached worktree
+          │
+          ▼
+verify declared changed paths and new workspace fingerprint
+          │
+          ▼
+write committed ledger
 ```
 
-The external graph remains authoritative after distillation.
+If validation fails after mutation, the runtime reverses the patch and verifies that the original fingerprint was restored. If the process crashes after application but before the committed ledger, the next invocation recognizes the matching intent and reverse-applicability, then commits the recovered operation without applying the patch again.
 
-### Stage 4 — Speed and structural optimization
+## Worktree isolation
 
-- benchmark MTP/speculative generation inside LLM nodes
-- search graph variants offline with a cost-aware evaluator
-- promote only validated graph versions
-- permit at most one compatible local region graft when runtime evidence proves the current region is structurally insufficient
+A new repository run requires a clean Git top-level checkout. The base reference is resolved to an immutable commit before creating a detached worktree.
 
-MTP accelerates token generation. It does not own graph transitions, checkpoints, or side-effect replay.
-
-## Offline graph optimization
-
-Candidate mutations may:
-
-- insert or remove an optional verifier region
-- swap a node prompt, adapter, model, or decoding policy
-- change a bounded traversal cap
-- alter decomposition or parallelization motifs
-- bypass a proven redundant node
-
-Score candidates on held-out tasks:
+The deterministic worktree path uses:
 
 ```text
-reward = task_quality
-       - λ_token × tokens
-       - λ_time × latency
-       - λ_tool × tool_calls
-       - λ_risk × unsafe_or_duplicate_effects
+workspace-home / sha256(source-path) / sanitized-run-id-plus-hash
 ```
 
-Promotion requires regression tests, paraphrase stability, tool-failure injection, schema-drift tests, and duplicate-effect tests.
+The run ID cannot escape the configured root. Existing deterministic worktrees are accepted only when they belong to the same Git common directory and remain pinned to the expected commit.
 
-## Evaluation
+In-place mode exists for controlled use, but detached worktree mode is the default.
 
-The retry-from-the-top baseline is bounded and uses the same provider. Report:
+## Verifier integrity
 
-- success or deterministic evaluator score
-- cost per successful task
-- model and tool calls
-- token and wall-clock cost
-- path length and repeated upstream nodes
-- duplicate external effects
-- crash/restart recovery
-- verifier false accepts and false rejects
-- route regret
-- path stability under paraphrase
-- no-progress and budget termination rates
-- behavior under tool failure and schema drift
+Verifier commands run without a shell. The runtime:
 
-Mock-provider results validate control flow only. Model capability claims require real held-out tasks, repeated seeds, stable evaluators, matched budgets, and identical tool environments.
+1. Parses the command with `shlex`.
+2. Rejects control operators and substitutions.
+3. Requires an allowlisted executable.
+4. Resolves non-local executables through a sanitized `PATH` that excludes the repository.
+5. Restricts Git to read-only subcommands.
+6. Executes in a new process group with no stdin.
+7. Applies a per-command timeout and bounded stdout/stderr capture.
+8. Stops on the first failed command.
+9. Compares workspace fingerprints before and after the entire verifier sequence.
+
+A command sequence that exits zero but changes tracked source is still a failed verifier result.
+
+The verifier is not a hostile-code sandbox. Repository code runs with local user permissions.
+
+## Durable state
+
+`RunState` stores:
+
+- graph name and version
+- task and current node
+- explicit data and artifacts
+- node attempts and edge traversal counts
+- completed-node history
+- model/tool/token/active-time metrics
+- budgets and no-progress state
+- provider and controller identity
+- output and terminal error
+
+SQLite commits each node result and the resulting checkpoint in one transaction. An append-only event row records transition decisions and masks.
+
+Side-effecting nodes are forbidden from using ordinary result caching. They implement their own idempotency boundary instead.
+
+## Same-run exclusion
+
+The local SQLite runtime holds a non-blocking per-run file lease for the full `run` or `resume` call. This prevents two processes from issuing duplicate model calls or racing checkpoint sequence numbers for the same run. POSIX releases the lease automatically on process death.
+
+Individual workspace mutation and test operations also hold a per-workspace lock.
+
+## Time semantics
+
+The local budget records accumulated active execution duration per node. A run paused for hours or days does not consume its `max_seconds` budget while idle. The audit timestamps still preserve wall-clock start and update times.
+
+## Transition authority
+
+For every non-terminal node:
+
+1. Evaluate edge predicates from explicit state.
+2. Remove edges that exhausted traversal limits.
+3. Ask the controller to rank only the surviving candidates.
+4. Apply the hard MLX mask when the MLX controller is used.
+5. Validate the returned edge against the candidate set again.
+6. Commit the node result and transition atomically.
+
+A controller returning a masked or invented edge raises a runtime error.
+
+## Policy learning
+
+The optional policy network receives 62 values for the default graph:
+
+- 16 task features
+- 34 budget, progress, verdict, workspace, patch, apply, test, and review features
+- 12 current-node one-hot values
+
+It predicts route, edge, stop, success value, and normalized costs. Policy files are bound to the graph schema hash and included in controller identity, preventing silent sidecar changes on resume.
+
+## Promotion boundary
+
+A successful run exports a cumulative patch from the base commit to the final worktree. Promotion is separate from graph execution and requires:
+
+- completed status
+- matching base commit in the source checkout
+- clean source worktree
+- matching patch SHA-256
+- successful revalidation and idempotent application
+
+The graph cannot promote itself.

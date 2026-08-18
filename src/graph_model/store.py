@@ -1,13 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import NodeResult, RunState
+
+
+
+try:  # pragma: no cover - Windows fallback is exercised only off POSIX
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
+
+_RUN_LOCKS: dict[str, threading.Lock] = {}
+_RUN_LOCKS_GUARD = threading.RLock()
+
+
+class RunAlreadyActive(RuntimeError):
+    """Raised when another process or thread owns the same run execution lease."""
 
 
 class SQLiteRunStore:
@@ -19,10 +35,46 @@ class SQLiteRunStore:
     """
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        self.path = Path(path).expanduser().resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._initialize()
+
+    @contextmanager
+    def run_lock(self, run_id: str) -> Iterator[None]:
+        """Hold a non-blocking per-run lease for the entire local execution call.
+
+        The OS file lock is released automatically after crashes on POSIX systems. The in-process
+        lock also prevents duplicate execution from concurrent asyncio entry points or threads.
+        """
+
+        digest = hashlib.sha256(run_id.encode("utf-8", errors="surrogatepass")).hexdigest()
+        lock_dir = self.path.parent / f".{self.path.name}.run-locks"
+        lock_path = lock_dir / f"{digest}.lock"
+        key = str(lock_path)
+        with _RUN_LOCKS_GUARD:
+            thread_lock = _RUN_LOCKS.setdefault(key, threading.Lock())
+        if not thread_lock.acquire(blocking=False):
+            raise RunAlreadyActive(f"run {run_id!r} is already active")
+        handle = None
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("a+b")
+            if fcntl is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise RunAlreadyActive(f"run {run_id!r} is already active") from exc
+            yield
+        finally:
+            if handle is not None:
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                handle.close()
+            thread_lock.release()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)

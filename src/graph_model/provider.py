@@ -50,6 +50,20 @@ class MockProvider(ModelProvider):
             }
         elif "semantic verifier" in system:
             payload = {"verdict": "pass", "reasons": [], "confidence": 0.99}
+        elif "failure diagnosis node" in system:
+            payload = {
+                "root_causes": ["mock verifier evidence requested a repair"],
+                "repair_steps": ["apply one local correction"],
+                "files_to_change": [],
+                "evidence": [],
+            }
+        elif "repository patch proposal node" in system or "repair patch node" in system:
+            payload = {
+                "summary": "Mock no-op repository proposal",
+                "patch": "",
+                "assumptions": [],
+                "no_changes_needed": True,
+            }
         else:
             payload = {
                 "result": "Mock candidate output",

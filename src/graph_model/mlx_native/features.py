@@ -45,8 +45,14 @@ STATE_FEATURE_NAMES: tuple[str, ...] = (
     "verdict_fail",
     "has_context",
     "has_plan",
+    "has_workspace",
+    "has_pending_patch",
     "has_candidate",
+    "has_apply_report",
+    "apply_pass",
+    "apply_fail",
     "has_test_report",
+    "test_mutated_workspace",
     "has_review",
     "has_diagnosis",
     "kind_router",
@@ -127,6 +133,11 @@ def state_features(
         )
     )
     node_index = tables.node_index[node_id]
+    apply_report = state.data.get("apply_report")
+    apply_verdict = (
+        str(apply_report.get("verdict", "")) if isinstance(apply_report, dict) else ""
+    )
+    test_report = state.data.get("test_report")
     return (
         _ratio(state.step_count, state.budget.max_steps),
         _ratio(state.metrics.llm_calls, state.budget.max_llm_calls),
@@ -146,8 +157,17 @@ def state_features(
         float(verdict == "fail"),
         float(bool(state.data.get("context_ready"))),
         float(bool(state.data.get("plan"))),
+        float(isinstance(state.data.get("workspace"), dict)),
+        float(bool(state.data.get("pending_patch"))),
         float(bool(state.data.get("candidate"))),
-        float(bool(state.data.get("test_report"))),
+        float(isinstance(apply_report, dict)),
+        float(apply_verdict == "pass"),
+        float(apply_verdict == "fail"),
+        float(isinstance(test_report, dict)),
+        float(
+            isinstance(test_report, dict)
+            and bool(test_report.get("test_mutated_workspace"))
+        ),
         float(bool(state.data.get("review"))),
         float(bool(state.data.get("diagnosis"))),
         float(node_kind == NodeKind.ROUTER),

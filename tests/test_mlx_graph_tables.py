@@ -15,8 +15,8 @@ def test_generated_graph_tables_match_the_validated_yaml() -> None:
     COMPILED_GRAPH.validate_graph(graph)
     assert compiled == COMPILED_GRAPH
     assert compiled.schema_hash == graph_schema_hash(graph)
-    assert len(compiled.node_ids) == 11
-    assert len(compiled.edge_keys) == 16
+    assert len(compiled.node_ids) == 12
+    assert len(compiled.edge_keys) == 19
 
 
 def test_compiled_masks_encode_only_declared_sources() -> None:

@@ -97,7 +97,9 @@ async def test_runtime_records_mlx_stop_and_edge_decisions(tmp_path: Path) -> No
     )
     state = await runtime.run("quick fix: rename one variable", run_id="mlx-trace")
     assert state.status == "completed"
-    assert state.completed_nodes == ["intake", "context", "implement", "tests", "review", "finish"]
+    assert state.completed_nodes == [
+        "intake", "context", "implement", "apply", "tests", "review", "finish"
+    ]
     intake = next(
         event
         for event in store.events("mlx-trace")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -11,7 +12,7 @@ from .controller import DeterministicGraphController, GraphController
 from .models import Budget, EdgeSpec, GraphSpec, NodeKind, NodeResult, RunState
 from .operators import ExecutionContext, OperatorRegistry
 from .provider import MockProvider, ModelProvider
-from .store import SQLiteRunStore
+from .store import RunAlreadyActive, SQLiteRunStore
 
 
 class GraphRuntimeError(RuntimeError):
@@ -105,6 +106,7 @@ def apply_node_result(
     result: NodeResult,
     cached: bool,
     now: float | None = None,
+    duration_seconds: float | None = None,
     edge_selector: EdgeSelector | None = None,
 ) -> str | None:
     _merge_dict(state.data, result.delta)
@@ -122,7 +124,14 @@ def apply_node_result(
         state.metrics.tool_calls += 1
     state.metrics.prompt_tokens += result.prompt_tokens
     state.metrics.completion_tokens += result.completion_tokens
-    state.metrics.elapsed_seconds = state.updated_at - state.started_at
+    if duration_seconds is None:
+        # Compatibility path for external durable adapters that supply only a deterministic clock.
+        state.metrics.elapsed_seconds = max(
+            state.metrics.elapsed_seconds,
+            state.updated_at - state.started_at,
+        )
+    else:
+        state.metrics.elapsed_seconds += max(0.0, duration_seconds)
 
     progress_key = result.progress_key or _canonical_hash(
         {"data": state.data, "artifacts": state.artifacts, "output": result.output}
@@ -163,8 +172,8 @@ def budget_violations(
     now: float | None = None,
     next_kind: NodeKind | None = None,
 ) -> list[str]:
-    current_time = time.time() if now is None else now
-    elapsed = current_time - state.started_at
+    del now  # retained for API compatibility with durable adapters
+    elapsed = state.metrics.elapsed_seconds
     metrics = state.metrics
     budget = state.budget
     violations: list[str] = []
@@ -222,6 +231,28 @@ class GraphRuntime:
         initial_data: dict[str, Any] | None = None,
         stop_after_steps: int | None = None,
     ) -> RunState:
+        effective_run_id = run_id or str(uuid.uuid4())
+        try:
+            with self.store.run_lock(effective_run_id):
+                return await self._run_locked(
+                    task,
+                    run_id=effective_run_id,
+                    budget=budget,
+                    initial_data=initial_data,
+                    stop_after_steps=stop_after_steps,
+                )
+        except RunAlreadyActive as exc:
+            raise GraphRuntimeError(str(exc)) from exc
+
+    async def _run_locked(
+        self,
+        task: str | None = None,
+        *,
+        run_id: str | None = None,
+        budget: Budget | None = None,
+        initial_data: dict[str, Any] | None = None,
+        stop_after_steps: int | None = None,
+    ) -> RunState:
         state = self.store.load_run(run_id) if run_id else None
         if state is None:
             if task is None:
@@ -250,6 +281,7 @@ class GraphRuntime:
 
             node = self.graph.nodes[state.current_node]
             self._check_budget(state, node.kind)
+            step_started = time.monotonic()
             input_hash = _canonical_hash(
                 {
                     "node": node.id,
@@ -313,6 +345,7 @@ class GraphRuntime:
                 node_kind=node.kind,
                 result=result,
                 cached=cached,
+                duration_seconds=time.monotonic() - step_started,
                 edge_selector=controller_edge_selector,
             )
             self.store.commit_step(

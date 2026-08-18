@@ -189,7 +189,7 @@ class MLXLocalProvider(ModelProvider):
         model_path: str,
         adapter_path: str | None = None,
         revision: str | None = None,
-        max_tokens: int = 1_024,
+        max_tokens: int = 8_192,
         default_temperature: float = 0.1,
         top_p: float = 1.0,
         min_p: float = 0.0,
@@ -237,7 +237,7 @@ class MLXLocalProvider(ModelProvider):
             model_path=model_path,
             adapter_path=os.getenv("GRAPH_MODEL_MLX_ADAPTER_PATH") or None,
             revision=os.getenv("GRAPH_MODEL_MLX_REVISION") or None,
-            max_tokens=int(os.getenv("GRAPH_MODEL_MLX_MAX_TOKENS", "1024")),
+            max_tokens=int(os.getenv("GRAPH_MODEL_MLX_MAX_TOKENS", "8192")),
             default_temperature=float(
                 os.getenv("GRAPH_MODEL_MLX_TEMPERATURE", "0.1")
             ),

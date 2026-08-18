@@ -1,14 +1,18 @@
 name: coding-supergraph
-version: 0.1.0
+version: 0.3.0
 description: >-
   A validated coding-agent supergraph. The router activates a fast direct path or a deeper
-  plan-and-check path. Failures enter a bounded diagnose-repair cycle rather than an open-ended loop.
+  plan-and-check path. Language nodes only propose patches; a dedicated idempotent apply gate owns
+  repository mutation. Failures enter a bounded diagnose-repair cycle rather than an open-ended loop.
 start: intake
 terminals: [finish, abort]
 metadata:
   policy: select-first-local-repair
   graph_plasticity: bounded
   optimizer: offline-mcts-compatible
+  repository_mutation: dedicated-transactional-apply-gate
+  workspace_execution: detached-git-worktree
+  verifier_integrity: fingerprint-before-and-after
 
 nodes:
   intake:
@@ -19,7 +23,9 @@ nodes:
   context:
     kind: tool
     operator: collect_context
-    description: Build explicit, inspectable task state.
+    description: Build explicit, inspectable task and repository state.
+    cacheable: false
+    side_effect: true
 
   plan:
     kind: llm
@@ -34,33 +40,41 @@ nodes:
   implement:
     kind: llm
     operator: implement
-    description: Produce a candidate result; cannot declare its own verification success.
+    description: Propose a candidate or unified diff; cannot mutate the repository or declare success.
+
+  apply:
+    kind: tool
+    operator: apply_candidate
+    description: Validate and idempotently apply only the pending graph-authorized patch.
+    cacheable: false
+    side_effect: true
 
   tests:
     kind: verifier
     operator: run_tests
-    description: Run deterministic checks before semantic review.
+    description: Run bounded deterministic commands before semantic review.
+    cacheable: false
     side_effect: true
 
   review:
     kind: llm
     operator: review
-    description: Independent semantic review after deterministic checks pass.
+    description: Independently review the verified diff against the objective.
 
   diagnose:
-    kind: tool
+    kind: llm
     operator: diagnose
-    description: Convert verifier evidence into targeted repair guidance.
+    description: Convert exact apply, test, and review evidence into targeted repair guidance.
 
   repair:
-    kind: tool
+    kind: llm
     operator: repair
-    description: Apply a bounded local repair without restarting successful upstream work.
+    description: Propose one bounded local repair against the current working tree.
 
   finish:
     kind: final
     operator: finalize
-    description: Return the verified result and its evidence.
+    description: Return the verified result, patch artifact, and exact evidence.
 
   abort:
     kind: final
@@ -107,8 +121,26 @@ edges:
     priority: 80
 
   - from: implement
-    to: tests
+    to: apply
     priority: 100
+
+  - from: apply
+    to: tests
+    when: data.verdict == 'pass'
+    priority: 100
+    max_traversals: 3
+
+  - from: apply
+    to: diagnose
+    when: data.verdict == 'fail' and data.repair_count < 2
+    priority: 90
+    max_traversals: 2
+    label: apply-repair
+
+  - from: apply
+    to: abort
+    when: data.verdict == 'fail' and data.repair_count >= 2
+    priority: 80
 
   - from: tests
     to: review
@@ -151,6 +183,6 @@ edges:
     max_traversals: 2
 
   - from: repair
-    to: tests
+    to: apply
     priority: 100
     max_traversals: 2

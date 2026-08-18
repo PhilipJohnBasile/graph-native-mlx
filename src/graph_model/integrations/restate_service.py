@@ -81,6 +81,7 @@ if restate is not None:  # pragma: no branch
                 state.updated_at = durable_now
                 break
             invocation_key = f"{state.run_id}:{node.id}:{state.step_count}"
+            node_started = float(await ctx.time()) / 1000.0
             payload = await ctx.run_typed(
                 f"node:{state.step_count}:{node.id}",
                 _execute_node,
@@ -89,6 +90,7 @@ if restate is not None:  # pragma: no branch
                 idempotency_key=invocation_key,
             )
             result = NodeResult.model_validate(payload)
+            node_finished = float(await ctx.time()) / 1000.0
             apply_node_result(
                 graph=graph,
                 state=state,
@@ -96,7 +98,8 @@ if restate is not None:  # pragma: no branch
                 node_kind=node.kind,
                 result=result,
                 cached=False,
-                now=float(await ctx.time()) / 1000.0,
+                now=node_finished,
+                duration_seconds=max(0.0, node_finished - node_started),
             )
         return state.model_dump()
 

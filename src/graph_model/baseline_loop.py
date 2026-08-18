@@ -60,6 +60,7 @@ class RalphLoopBaseline:
             state.data["verdict"] = "pending"
             await self._invoke(state, "plan", path, metrics)
             await self._invoke(state, "implement", path, metrics)
+            await self._invoke(state, "apply", path, metrics)
             test_result = await self._invoke(state, "tests", path, metrics)
 
             if test_result.verdict == "pass":

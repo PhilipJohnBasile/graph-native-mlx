@@ -15,6 +15,12 @@ from .router_policy import HashedLinearRouter, train_router_file
 from .runtime import BudgetExceeded, GraphRuntime, GraphRuntimeError
 from .store import SQLiteRunStore
 from .trace_export import export_router_training_data
+from .workspace import (
+    DEFAULT_ALLOWED_COMMANDS,
+    RepositoryWorkspace,
+    WorkspaceError,
+    workspace_initial_data,
+)
 
 
 def _store(path: str | None) -> SQLiteRunStore:
@@ -59,9 +65,30 @@ async def _run_command(args: argparse.Namespace) -> int:
             provider=_provider(args.provider),
             controller=_controller(args.controller, graph, provider_name=args.provider),
         )
+        initial_data = None
+        if args.repo:
+            allowed_commands = args.allowed_command or list(DEFAULT_ALLOWED_COMMANDS)
+            initial_data = workspace_initial_data(
+                source_root=args.repo,
+                mode=args.workspace_mode,
+                base_ref=args.base_ref,
+                workspace_home=args.workspace_home,
+                artifact_root=args.artifact_root,
+                test_commands=args.test_command or (),
+                allowed_commands=allowed_commands,
+                command_timeout_seconds=args.command_timeout,
+                max_command_output_bytes=args.max_command_output_bytes,
+                max_context_files=args.max_context_files,
+                max_context_file_bytes=args.max_context_file_bytes,
+                max_context_bytes=args.max_context_bytes,
+                max_patch_bytes=args.max_patch_bytes,
+                max_patch_files=args.max_patch_files,
+                allow_sensitive_paths=args.allow_sensitive_paths,
+            )
         state = await runtime.run(
             args.task,
             run_id=args.run_id,
+            initial_data=initial_data,
             stop_after_steps=args.stop_after_steps,
         )
     except BudgetExceeded as exc:
@@ -119,6 +146,108 @@ async def _resume_command(args: argparse.Namespace) -> int:
         return 2
     print(state.model_dump_json(indent=2))
     return 0 if state.status != "failed" else 1
+
+
+def _apply_result_command(args: argparse.Namespace) -> int:
+    store = _store(args.db)
+    state = store.load_run(args.run_id)
+    if state is None:
+        print(json.dumps({"status": "failed", "error": "run not found"}, indent=2))
+        return 2
+    if state.status != "completed":
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": f"run must be completed before promotion; status={state.status}",
+                },
+                indent=2,
+            )
+        )
+        return 2
+    workspace = RepositoryWorkspace.from_state_data(state.data, run_id=state.run_id)
+    if workspace is None:
+        print(json.dumps({"status": "failed", "error": "run has no repository workspace"}, indent=2))
+        return 2
+    manifest = state.artifacts.get("verified-patch.json")
+    if not isinstance(manifest, dict):
+        output_workspace = (state.output or {}).get("workspace") if isinstance(state.output, dict) else None
+        manifest = (
+            output_workspace.get("verified_patch")
+            if isinstance(output_workspace, dict)
+            else None
+        )
+    if not isinstance(manifest, dict) or not manifest.get("path") or not manifest.get("sha256"):
+        print(json.dumps({"status": "failed", "error": "verified patch manifest is missing"}, indent=2))
+        return 2
+    try:
+        report = workspace.promote_verified_patch(
+            str(manifest["path"]),
+            str(manifest["sha256"]),
+        )
+    except (WorkspaceError, OSError, ValueError) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
+        return 2
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+
+def _cleanup_command(args: argparse.Namespace) -> int:
+    store = _store(args.db)
+    try:
+        with store.run_lock(args.run_id):
+            state = store.load_run(args.run_id)
+            if state is None:
+                print(json.dumps({"status": "failed", "error": "run not found"}, indent=2))
+                return 2
+            if state.status == "running" and not args.force:
+                print(
+                    json.dumps(
+                        {
+                            "status": "failed",
+                            "error": "run is still active or resumable; pass --force to discard its worktree",
+                        },
+                        indent=2,
+                    )
+                )
+                return 2
+            workspace = RepositoryWorkspace.from_state_data(
+                state.data, run_id=state.run_id
+            )
+            if workspace is None:
+                print(
+                    json.dumps(
+                        {"status": "failed", "error": "run has no repository workspace"},
+                        indent=2,
+                    )
+                )
+                return 2
+            retained_patch = False
+            for key in ("verified-patch.json", "failed-patch.json"):
+                manifest = state.artifacts.get(key)
+                if isinstance(manifest, dict) and manifest.get("path"):
+                    retained_patch = Path(str(manifest["path"])).is_file()
+                    if retained_patch:
+                        break
+            report = workspace.cleanup_worktree(
+                force=args.force or retained_patch
+            )
+    except (WorkspaceError, OSError, ValueError, RuntimeError) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
+        return 2
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
 
 
 def _trace_command(args: argparse.Namespace) -> int:
@@ -278,6 +407,53 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id")
     _add_runtime_options(run)
     run.add_argument("--stop-after-steps", type=int)
+    run.add_argument("--repo", help="Git repository root for real coding-agent mode")
+    run.add_argument(
+        "--workspace-mode",
+        choices=("worktree", "in-place"),
+        default="worktree",
+        help="worktree leaves the source checkout untouched; in-place mutates it directly",
+    )
+    run.add_argument("--base-ref", default="HEAD")
+    run.add_argument("--workspace-home")
+    run.add_argument("--artifact-root")
+    run.add_argument(
+        "--test-command",
+        action="append",
+        help="bounded verifier command; repeat for multiple commands (auto-detected when omitted)",
+    )
+    run.add_argument(
+        "--allowed-command",
+        action="append",
+        help="replace the default verifier executable allowlist; repeat per executable",
+    )
+    run.add_argument("--command-timeout", type=float, default=300.0)
+    run.add_argument("--max-command-output-bytes", type=int, default=200_000)
+    run.add_argument("--max-context-files", type=int, default=18)
+    run.add_argument("--max-context-file-bytes", type=int, default=40_000)
+    run.add_argument("--max-context-bytes", type=int, default=180_000)
+    run.add_argument("--max-patch-bytes", type=int, default=500_000)
+    run.add_argument("--max-patch-files", type=int, default=32)
+    run.add_argument("--allow-sensitive-paths", action="store_true")
+
+    apply_result = subparsers.add_parser(
+        "apply-result",
+        help="apply a completed worktree run's hash-verified patch to its clean source checkout",
+    )
+    apply_result.add_argument("--run-id", required=True)
+    apply_result.add_argument("--db")
+
+    cleanup = subparsers.add_parser(
+        "cleanup",
+        help="remove a run's detached worktree while retaining patches, traces, and artifacts",
+    )
+    cleanup.add_argument("--run-id", required=True)
+    cleanup.add_argument("--db")
+    cleanup.add_argument(
+        "--force",
+        action="store_true",
+        help="discard a running or unexported dirty worktree",
+    )
 
     benchmark = subparsers.add_parser("benchmark", help="compare graph execution with a retry loop")
     benchmark.add_argument("--input", required=True)
@@ -365,6 +541,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "run":
         code = asyncio.run(_run_command(args))
+    elif args.command == "apply-result":
+        code = _apply_result_command(args)
+    elif args.command == "cleanup":
+        code = _cleanup_command(args)
     elif args.command == "benchmark":
         code = asyncio.run(_benchmark_command(args))
     elif args.command == "resume":

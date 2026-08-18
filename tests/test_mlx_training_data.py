@@ -7,6 +7,7 @@ from graph_model.graph import load_default_graph
 from graph_model.mlx_native.controller import MLXGraphController
 from graph_model.mlx_native.decision import PythonDecisionBackend
 from graph_model.mlx_native.graph_tables import compile_graph
+from graph_model.mlx_native.features import controller_input_size
 from graph_model.mlx_native.training_data import (
     export_mlx_policy_training_data,
     read_policy_training_data,
@@ -34,12 +35,12 @@ async def test_policy_training_export_contains_hard_masks_and_features(tmp_path:
 
     output = tmp_path / "policy.jsonl"
     count = export_mlx_policy_training_data(store, output, graph=graph)
-    assert count == 6
+    assert count == 7
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert rows[0]["decision_type"] == "route"
     assert rows[0]["route_label"] == 0
     transition_rows = [row for row in rows if row["decision_type"] == "transition"]
-    assert len(transition_rows) == 5
+    assert len(transition_rows) == 6
     assert all(sum(row["allowed_edge_mask"]) == 1 for row in transition_rows)
     assert all(sum(row["allowed_stop_mask"]) >= 1 for row in transition_rows)
 
@@ -54,7 +55,7 @@ def test_policy_training_data_rejects_labels_below_not_applicable(tmp_path: Path
         "run_id": "bad",
         "node_id": "intake",
         "decision_type": "route",
-        "features": [0.0] * 55,
+        "features": [0.0] * controller_input_size(tables),
         "route_label": -2,
         "edge_label": -1,
         "stop_label": -1,

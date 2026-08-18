@@ -5,7 +5,7 @@ import uuid
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class NodeKind(str, Enum):
@@ -26,6 +26,15 @@ class NodeSpec(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     cacheable: bool = True
     side_effect: bool = False
+
+    @model_validator(mode="after")
+    def validate_effect_caching(self) -> "NodeSpec":
+        if self.side_effect and self.cacheable:
+            raise ValueError(
+                f"side-effecting node {self.id!r} must set cacheable=false; "
+                "replay must be handled by its idempotency boundary"
+            )
+        return self
 
 
 class EdgeSpec(BaseModel):
@@ -179,6 +188,13 @@ class RunState(BaseModel):
     updated_at: float = Field(default_factory=time.time)
     output: Any = None
     error: str | None = None
+
+    @field_validator("run_id")
+    @classmethod
+    def validate_run_id(cls, value: str) -> str:
+        if not value or len(value) > 512 or any(character in value for character in "\r\n\x00"):
+            raise ValueError("run_id must be 1..512 characters without control separators")
+        return value
 
     @classmethod
     def new(
