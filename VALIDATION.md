@@ -1,4 +1,4 @@
-# Validation Record — v0.4.0
+# Validation Record — v0.5.0
 
 ## Portable validation environment
 
@@ -9,50 +9,61 @@
 
 ## Completed checks
 
-- 85 portable tests passed
+- 92 portable tests passed
 - all source and test modules compiled with `compileall`
-- source formatting and patch hygiene passed `git diff --check`
 - YAML graph validated as 12 nodes, 19 edges, and 2 terminals
-- generated graph module reproduced byte-for-byte from the YAML source
-- graph schema hash verified as `1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f`
+- generated default graph module reproduced from the YAML source
+- default graph schema hash verified as `1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f`
 - mock fast, deep, repair-success, review-repair, and bounded-abort paths passed
 - real temporary Git repository repaired through an initial bad patch, failing pytest evidence, one diagnosis, one local repair, and a passing rerun
 - cumulative verified patch excluded the failed intermediate edit
-- source checkout remained untouched in worktree mode
+- source checkout remained untouched in detached-worktree mode
 - patch promotion was hash-checked and idempotent
 - worktree cleanup retained the promotable patch artifact
-- patch application replay and crash-window recovery passed
-- transactional rollback and declared-path enforcement covered
-- traversal, sensitive-file, binary, rename, symlink, and mismatched-header rejection covered
-- verifier shell-control and mutating-Git rejection covered
-- repository `PATH` executable spoofing rejection covered
-- test-induced tracked workspace mutation detection covered
-- safe run-ID path generation covered
-- workspace/artifact-root escape prevention covered
-- same-run execution lease covered
-- active-time budget semantics covered
+- patch application replay, interruption recovery, transactional rollback, and declared-path enforcement passed
+- traversal, sensitive-file, binary, rename, symlink, submodule, and mismatched-header rejection passed
+- verifier shell-control, mutating-Git, repository-executable spoofing, timeout, output, and tracked-mutation controls passed
+- safe run-ID paths, workspace/artifact-root confinement, same-run leases, and active-time budget semantics passed
 - direct MLX provider behavior validated through an injected backend
-- model/tokenizer residency, explicit provider close, and post-close rejection covered
-- MLX-LM loader-signature compatibility covered
-- chat-template fallback and complete-JSON extraction covered
-- single-worker affinity for load, generation, hidden extraction, and policy inference covered
-- Qwen final-layer and selected-layer hidden extraction covered through injected model structures
-- both `model.model` and `model.language_model.model` backbone layouts covered
-- layer selectors, pooling modes, deterministic CountSketch projection, and bounded policy prompts covered
-- immutable hidden-artifact hashing, metadata verification, missing/tampered artifact rejection, and raw-data non-persistence covered
-- hidden LRU cache behavior and zero duplicate-prefill accounting covered
-- MLX route/edge/stop masks and invalid-transition rejection covered
-- stop/edge representation reuse at one checkpoint and fresh representations after changed state covered
-- durable policy-call, policy-prefill-token, and transition-latency accounting covered
-- policy config binding to graph schema, model fingerprint, extractor schema, and dimensions covered
-- controller startup rejects an incompatible hidden-policy sidecar before inference
-- trace collection executes real repository manifests and records hidden-artifact counts
-- exported decisions require hash-verified state-specific hidden representations when requested
-- mixed feature dimensions, extractor schemas, model fingerprints, and explicit-only/hidden datasets are rejected
-- run-level train/validation splitting prevents decisions from one run crossing partitions
-- AdamW training, early stopping, best-validation-weight restoration, and deployed-loss recomputation covered
-- CLI export executes once and returns structured failure on invalid trace data
-- resume identity checks cover provider, graph, controller, policy config, and policy-file fingerprints
+- model/tokenizer residency, explicit close, post-close rejection, loader-signature compatibility, chat-template fallback, and complete-JSON extraction passed
+- single-worker affinity for model load, generation, hidden extraction, and policy inference passed
+- Qwen final-layer and selected-layer extraction passed through injected model structures
+- both `model.model` and `model.language_model.model` backbone layouts passed
+- layer selectors, pooling modes, deterministic CountSketch projection, bounded policy prompts, immutable hidden artifacts, metadata verification, cache behavior, and raw-data non-persistence passed
+- MLX route/edge/stop masks and invalid-transition rejection passed
+- durable policy-call, policy-prefill-token, and transition-latency accounting passed
+- policy binding to graph schema, model fingerprint, extractor schema, dimensions, configuration, and file hashes passed
+- repository trace collection, hidden-required export, homogeneous-dataset enforcement, run-level splitting, AdamW training, early stopping, and best-weight restoration passed
+
+## v0.5 qualification checks
+
+- the Mac qualification workflow was executed through injected provider, diagnostics, hidden-state, and controller backends
+- platform/configuration, model-load, structured-generation, hidden-capture, hard-masked route/stop/edge control, and provider-close stages passed
+- JSON and Markdown evidence artifacts were written and parsed
+- provider shutdown after qualification passed
+- qualification security metadata confirms raw hidden tensors and raw policy prompts are not persisted
+- actual Apple Silicon and Metal execution remains a separate hardware gate
+
+## v0.5 graph-optimization checks
+
+- synchronous and asynchronous constrained MCTS compiled and executed
+- contradictory mutations for one logical slot cannot be stacked in one path
+- duplicate graph schemas are evaluated once
+- real graph executions feed the optimization objective
+- LLM-node temperature changes affect actual operator calls
+- non-LLM configuration mutation is rejected
+- edge traversal limits may be preserved or lowered but not increased
+- edge priorities are restricted to existing edges and a bounded range
+- training/validation overlap by case ID is rejected
+- exact duplicated task/repository identity across training and held-out validation is rejected
+- a cost-improving candidate with unchanged expected outcomes passed independent validation and was promoted
+- an unchanged base graph remained a non-promoted candidate
+- promoted graph bundle verification passed
+- non-promoted bundle loading with `--require-promoted` failed as intended
+- graph-file tampering was detected
+- manifest, graph, compiled-table, benchmark, reward, mutation-path, and promotion-gate consistency checks passed
+- compiled graph tables were regenerated from `graph.yaml` and compared byte-for-byte
+- CLI `optimize-graph` and `verify-graph-bundle` completed against portable mock task sets
 
 ## Packaging gates
 
@@ -65,6 +76,8 @@ The release process additionally validates:
 - imported package version
 - installed `graph-model --help`
 - installed `graph-model validate`
+- installed graph optimization and bundle verification commands
+- release-wide removal scan for the withdrawn job-application material
 - SHA-256 hashes for the source archive and wheel
 
 ## Hardware validation boundary
@@ -74,11 +87,13 @@ This environment cannot execute Apple Metal or load the selected Qwen checkpoint
 ```bash
 graph-model validate
 graph-model mlx-doctor
-graph-model mlx-doctor --load-model
+graph-model qualify-mac --output-dir .graph-model/qualification
 ```
 
-A successful model load and hidden-state diagnostic are required before claiming compatibility, memory fit, correctness, or performance for the exact model repository, immutable revision, installed MLX/MLX-LM versions, adapter, quantization, and hardware configuration.
+A passing qualification report is required before claiming compatibility, memory fit, correctness, or performance for the exact model repository, immutable revision, installed MLX/MLX-LM versions, adapter, quantization, and hardware configuration.
+
+MLX memory telemetry is best-effort runtime evidence and should not be treated as a complete process-footprint measurement without independent operating-system observation.
 
 ## Security boundary
 
-The verifier runs trusted repository code with local user permissions. The portable suite validates command, path, timeout, output, mutation, and worktree controls; it does not establish hostile-code isolation. Use a restricted VM or container for untrusted repositories.
+The verifier runs trusted repository code with local user permissions. The portable suite validates command, path, timeout, output, mutation, worktree, promotion, and graph-search controls; it does not establish hostile-code isolation. Use a restricted VM or container for untrusted repositories.

@@ -2,245 +2,166 @@
 
 ## Scope
 
-Version 0.4 keeps Qwen generation, hidden-state extraction, and graph-policy inference in one process while preserving Git, test, checkpoint, permission, and promotion authority in the host runtime.
+v0.5 keeps language generation, hidden extraction, and optional graph-policy inference in one process while retaining Git, tests, journals, permissions, and promotion in the host effect plane.
 
 ```text
-Qwen/MLX-LM                   Host runtime
---------------------------    --------------------------------
-node text generation          durable SQLite/Restate journal
-selected hidden states        Git worktree and patch effects
-fixed-size projection         verifier process execution
-policy fusion and logits      idempotency and crash recovery
-hard tensor mask              final transition validation
+Model plane       Qwen generation and selected hidden representations
+Policy plane      explicit state + projected Qwen features + hard MLX masks
+Effect plane      Git, tests, checkpoints, permissions, promotion, cleanup
 ```
 
-Tensor evaluation cannot provide a durable transaction log or safely authorize an external side effect. The split is intentional.
-
-## State-aware policy forward
-
-A policy decision is conditioned on the current checkpoint, not only the original task.
-
-The bounded deterministic policy-state prompt includes:
-
-- task identity and bounded task text
-- current graph node and decision type
-- completed nodes, attempts, and edge counts
-- route, verdict, repair, and plan-revision state
-- remaining step, model-call, tool-call, token, and active-time budgets
-- bounded plan, patch/apply, test, review, and diagnosis evidence
-- artifact names and progress state
-
-Runtime identity metadata, secrets, and complete repository artifacts are excluded. Oversized evidence is compacted to an excerpt plus SHA-256.
-
-For one checkpoint, stop and edge selection share the same policy representation. A later checkpoint or changed evidence receives a fresh representation. Hidden observations are held in a bounded LRU cache, and the runtime charges policy-prefill tokens only when Qwen actually performs a new hidden-state forward.
-
-## Hidden-state extraction
-
-The provider resolves supported Qwen backbones exposed as either:
-
-```text
-model.model
-model.language_model.model
-```
-
-Selectors support:
-
-```text
-final       normalized final backbone output
-0           first decoder layer output
--1          last decoder layer output before final norm
-25%         decoder layer at approximately 25% depth
-```
-
-Pooling options:
-
-```text
-last-token
-mean
-mean-last
-```
-
-The final-only path calls the model’s own normalized backbone. Selected intermediate layers use a no-cache decoder pass with the model’s attention and state-space masks. Multi-layer extraction requires pipeline size one.
-
-Each selected view is L2-normalized, projected into a disjoint block using deterministic CountSketch, and concatenated into a fixed-size vector. The default output is 256 values.
-
-## Artifact boundary
-
-`HiddenStateArtifactStore` writes immutable hash-addressed JSON containing only:
-
-- projected finite features
-- model fingerprint
-- extractor schema hash
-- prompt/task hashes
-- source path and layer labels
-- dimensions, pooling, and token count
-
-It does not persist the rendered policy prompt or raw Qwen hidden tensors. Every artifact is verified against its SHA-256 and metadata when exported for training.
-
-## Dedicated MLX affinity worker
-
-`MLXLocalProvider` owns one `ThreadPoolExecutor(max_workers=1)`. The following all execute on that same worker:
-
-- model and tokenizer load
-- streaming generation
-- hidden-state extraction
-- policy sidecar construction
-- policy forward passes
-- MLX masked softmax and argmax when invoked through the controller
-
-This preserves stable thread affinity around mutable generation/cache state and prevents concurrent graph decisions from racing the resident model. The CLI closes the provider after run, resume, benchmark, trace collection, and model diagnostics.
-
-## Transition pipeline
-
-```text
-compiled graph structure
-        │
-runtime predicates and traversal caps
-        │
-explicit 62-value state vector
-        │
-projected Qwen state representation
-        │
-gated residual policy fusion
-        │
-route / edge / stop residual logits + value + cost
-        │
-MLX hard mask + softmax + argmax
-        │
-runtime validates selected edge again
-        │
-durable checkpoint commit
-```
-
-The learned policy cannot unmask an invalid transition.
+Tensor evaluation is not a durable transaction log and cannot authorize external effects. The separation is intentional.
 
 ## Source map
 
 ```text
 src/graph_model/
-  runtime.py                       graph authority, budgets, run lease
-  store.py                         SQLite checkpoints and traces
-  workspace.py                     Git worktrees, patch transaction, verifier
-  operators.py                     typed graph-node implementations
-  trace_collection.py              JSONL repository-task trace runner
+  runtime.py                       graph authority and durable transitions
+  store.py                         SQLite checkpoints, traces, run exclusion
+  workspace.py                     worktrees, patch transaction, verifier runner
+  operators.py                     typed node implementations
+  trace_collection.py              sequential real-repository trace batches
   graphs/coding_supergraph.yaml    editable graph source
 
   mlx_native/
-    provider.py                    resident MLX-LM provider and affinity worker
-    qwen_hidden.py                 Qwen backbone and selected-layer forward
-    hidden_state.py                state prompt, projection, immutable artifacts
+    provider.py                    resident MLX-LM provider and hidden capture
+    qwen_hidden.py                 backbone discovery and selected-layer forward
+    hidden_state.py                projection, identity, artifact integrity
+    decision_context.py            bounded evidence-aware hidden prompt context
     graph_tables.py                graph compiler and schema hashing
     generated_coding_graph.py      immutable generated constants
-    decision.py                    MLX masked softmax and argmax
-    features.py                    explicit 62-value policy vector
-    policy.py                      gated route/edge/stop/value/cost network
-    controller.py                  state-aware hard-mask integration
-    training_data.py               trace-to-policy JSONL export
-    trainer.py                     run-split multi-task MLX trainer
-    doctor.py                      Mac, hidden-state, policy, and model diagnostics
+    decision.py                    masked softmax and argmax
+    features.py                    explicit 62-value state vector
+    policy.py                      gated route/edge/stop/value/cost sidecar
+    controller.py                  masks and shadow/guarded/active deployment
+    policy_audit.py                durable decision-deployment summaries
+    qualification.py               M5/Metal acceptance and integrity report
+    training_data.py               trace export and dataset identity checks
+    trainer.py                     MLX sidecar training and validation split
+    doctor.py                      Mac, model, hidden, and policy diagnostics
 ```
 
 ## Direct MLX-LM provider
 
 `MLXLocalProvider`:
 
-- keeps one model and tokenizer resident
-- accepts a local path or model repository ID
-- supports revision pinning across compatible MLX-LM loader signatures
-- applies the tokenizer chat template when available
-- falls back to explicit role delimiters
-- uses `make_sampler` and `stream_generate`
-- extracts the final complete JSON object from surrounding reasoning text
-- records generation prompt/completion tokens plus hidden-policy prefill tokens and policy-call latency
-- defaults to 8,192 output tokens for coding patches
-- exposes a state-aware hidden source to the graph controller
-- caches a bounded number of identical hidden observations; cache hits add no new prefill-token charge
+- loads one model and tokenizer through `mlx_lm.load`
+- keeps them resident across graph nodes and trace tasks
+- streams node generations through `mlx_lm.stream_generate`
+- adapts to compatible MLX-LM loader signatures
+- applies the tokenizer chat template with a role-delimited fallback
+- serializes generation and hidden extraction under one lock
+- reports prompt and completion token counts
+- supports a local path or Hugging Face repository ID
+- fingerprints local model identity and requires immutable remote identity for promoted hidden traces
 
-MTP/speculative decoding is not enabled by this runtime. It may later accelerate text generation inside a node, but it must not own graph transitions, idempotency, or recovery.
+The direct provider passes no separate draft model to `stream_generate`. Its generation mode is therefore reported as `mlx-lm-standard-stream-generate`. A loaded checkpoint may expose `mtp_forward`, but that is capability metadata, not evidence that generated tokens used MTP.
 
-## Compiled graph tables
+## Qwen hidden-state path
 
-`graph-model compile-graph` emits stable node IDs, edge keys, source/target arrays, priorities, traversal limits, condition strings, per-node structural masks, terminal masks, and a deterministic graph schema SHA-256. Generated tables validate themselves against the YAML source.
+The provider renders the task without an assistant generation suffix and performs a bounded hidden forward.
 
-## Policy sidecar
-
-The default explicit input is:
+Default:
 
 ```text
-16 task features
-34 run/repository-state features
-12 one-hot node features
----------------------------
-62 explicit inputs
+layers      final
+pooling     last-token
+projection  deterministic CountSketch
+size        256
+scope       task
 ```
 
-The optional backbone input is a fixed projected hidden vector, 256 values by default.
-
-Fusion:
+Layer selectors:
 
 ```text
-explicit -> normalize -> project ───────────────┐
-                                                ├─ concatenate -> gate/candidate -> residual
-Qwen projection -> normalize -> project ────────┘
+final
+0, 7, 31
+-1, -2
+25%, 50%, 75%, 100%
 ```
 
-Outputs:
+`final` captures the normalized language-backbone output. `100%` refers to the raw output of the last decoder layer before final normalization.
 
-```text
-3 route residual logits
-19 edge residual logits
-4 stop residual logits
-1 success logit
-3 positive cost estimates
-```
+Intermediate-layer extraction follows the discovered Qwen text backbone with `embed_tokens`, decoder layers or pipeline layers, and final normalization. Pipeline-parallel extraction supports final-only capture; selected intermediate layers require a single-process backbone.
 
-The config binds graph name/version/schema, explicit size, hidden size, Qwen feature size, hidden extractor schema, and model fingerprint. Controller identity also includes hashes of the sidecar weights and config.
+## Task and decision scopes
 
-## Trace export and training
+`GRAPH_MODEL_MLX_HIDDEN_SCOPE=task` renders only the software task. The projected representation is reused throughout the run.
 
-`graph-model export-mlx-policy --require-hidden` loads and verifies every referenced hidden artifact, then emits:
+`GRAPH_MODEL_MLX_HIDDEN_SCOPE=decision` adds a deterministic JSON context containing bounded current state:
 
-- exact explicit feature vector
-- projected hidden vector
-- graph, model, and extractor identities
-- selected route/edge/stop labels
-- allowed edge and stop masks
-- terminal reward
-- normalized token, active-time, and tool-call targets
+- node, route, and verdict
+- step, attempt, repair, and revision counts
+- edge traversals
+- remaining budgets
+- selected apply/test/review evidence
 
-Mixed explicit-only/hidden datasets, mixed hidden dimensions, mixed extractor schemas, and mixed model fingerprints are rejected.
+Known secret-bearing keys are redacted. Depth, collection sizes, strings, and evidence counts are bounded. A new hidden forward occurs only when the resulting decision-context hash changes.
 
-The trainer uses:
+## Hidden artifact
 
-- route cross-entropy
-- hard-mask-aware edge cross-entropy
-- hard-mask-aware stop cross-entropy
-- success-value MSE
-- cost MSE
-- AdamW
-- deterministic run-level train/validation splitting
-- early stopping on validation loss
+Raw selected tensors are transient. The artifact store writes:
 
-Behavioral cloning is initialization, not proof of improvement. Promotion should depend on held-out task quality, deterministic verifier evidence, cost, and comparison against the hardcoded controller.
+- projected features
+- model fingerprint
+- extractor schema hash
+- task and prompt hashes
+- source backbone path and layer labels
+- dimensions, pooling, and token count
+- artifact content hash
 
-## Current boundary
+It does not write raw task text, rendered prompts, or raw hidden tensors. Projected features remain task-derived private data.
 
-Implemented:
+## MLX policy sidecar
 
-- resident direct MLX-LM backbone
-- state-aware Qwen hidden extraction
-- deterministic projected hidden artifacts
-- gated hidden/explicit policy fusion
-- compiled hard graph masks
-- real repository workspace and verifier integration
-- durable effects, trace collection, export, and policy training
+The sidecar fuses explicit and optional Qwen features and returns:
 
-Not yet implemented:
+- route logits
+- one logit per compiled edge
+- stop-action logits
+- completion-value estimate
+- normalized token, latency, and tool-call costs
 
-- joint LM plus graph-policy LoRA training
-- MTP/speculative generation integration
-- hostile-code process sandboxing
-- offline MCTS graph promotion
-- validated inference-time subgraph grafting
+Hard masks are applied after logits are produced. A second host-side validation rejects any selected transition outside the current candidate set.
 
-The actual selected model must still pass the M5 Max load and hidden-capture gate; portable Linux validation cannot execute Metal.
+## Deployment modes
+
+The controller always computes a hardcoded baseline. When a sidecar exists, it also computes a masked candidate.
+
+- `shadow`: baseline selected, candidate audited
+- `guarded`: candidate selected only after value/confidence/margin gates
+- `active`: candidate selected whenever legal
+
+The controller identity includes mode and thresholds, preventing a resumed run from changing deployment semantics.
+
+## Qualification
+
+`graph-model qualify-mlx` uses one resident provider to collect:
+
+- platform and package versions
+- Metal/device information
+- allocator active, peak, and cache memory
+- model identity and capability metadata
+- repeated hidden-feature determinism
+- exact repeated-generation regression results
+- required-gate verdicts
+- content SHA-256
+
+The repeated-generation probe does not pass an explicit reusable server prompt cache. It is a resident-process regression test, not a complete server cache qualification.
+
+## Training
+
+The Qwen backbone remains frozen. Training operates on exported projected features and explicit state.
+
+Successful runs train route, edge, stop, value, and cost targets. Failed runs train value and cost but do not positively imitate failed actions. Train/validation partitioning occurs by run ID.
+
+A policy config is bound to:
+
+- graph schema
+- explicit and hidden feature sizes
+- model fingerprint
+- hidden extractor schema
+- fusion version
+- policy configuration and weight hashes
+
+A mismatch fails closed before a policy decision is used.

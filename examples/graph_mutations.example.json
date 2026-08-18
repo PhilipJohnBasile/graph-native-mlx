@@ -1,0 +1,24 @@
+[
+  {
+    "kind": "node_config",
+    "node": "implement",
+    "name": "temperature",
+    "value": 0.0
+  },
+  {
+    "kind": "node_config",
+    "node": "repair",
+    "name": "temperature",
+    "value": 0.0
+  },
+  {
+    "kind": "edge_limit",
+    "edge_key": "plan->plan_check:always",
+    "max_traversals": 1
+  },
+  {
+    "kind": "edge_priority",
+    "edge_key": "tests->abort:data.verdict == 'fail' and data.repair_count >= 2",
+    "priority": 95
+  }
+]

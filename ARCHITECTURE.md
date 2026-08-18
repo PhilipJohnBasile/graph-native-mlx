@@ -2,11 +2,13 @@
 
 ## Design objective
 
-Replace an open-ended retry loop with a durable, inspectable, graph-controlled system in which every operation has a name, state contract, allowed successors, retry cap, evidence boundary, and checkpoint.
+Replace an open-ended agent retry loop with a durable, inspectable, graph-controlled system in which every operation has a name, state contract, allowed successors, retry cap, evidence boundary, and checkpoint.
+
+The system is split into three planes:
 
 ```text
-Model plane      Qwen/MLX generates typed proposals and state representations
-Policy plane     explicit state + Qwen features + validated hard graph masks
+Model plane      Qwen/MLX generates typed proposals and hidden features
+Policy plane     validated graph + hard priors + optional learned MLX heads
 Effect plane     Git, tests, journals, permissions, promotion, cleanup
 ```
 
@@ -14,7 +16,7 @@ The model and learned policy are advisory. The effect plane remains authoritativ
 
 ## Default graph
 
-The v0.4 package retains the validated 12-node, 19-edge graph introduced in v0.3. Its schema is unchanged; v0.4 changes the policy representation and training pipeline.
+v0.5 retains the 12-node, 19-edge repository graph introduced in v0.3.
 
 | Node | Kind | Responsibility |
 |---|---|---|
@@ -31,34 +33,92 @@ The v0.4 package retains the validated 12-node, 19-edge graph introduced in v0.3
 | `finish` | final | Export cumulative verified patch and evidence |
 | `abort` | final | Export failed patch/evidence after bounded paths are exhausted |
 
-Repairs return to `apply`, not directly to `tests`. Every proposed mutation crosses the same validation and idempotency gate.
+Repairs return to `apply`, not directly to `tests`. Every proposed mutation therefore crosses the same validation and idempotency gate.
 
-## Policy representation
-
-At each policy checkpoint, the controller builds two inputs:
-
-1. A 62-value explicit vector encoding task shape, current node, budgets, progress, repository state, patch state, and verifier state.
-2. A projected Qwen representation of a bounded structured rendering of the same checkpoint plus richer plan/test/review/diagnosis evidence.
-
-Route receives a `route` representation. Stop and edge selection at one post-node checkpoint share one `transition` representation and one policy forward. A changed checkpoint invalidates the cache.
-
-The Qwen feature pipeline is:
+## Repository transaction
 
 ```text
-checkpointed state
-      │
-bounded deterministic policy prompt
-      │
-selected Qwen hidden layer views
-      │
-per-view pooling and L2 normalization
-      │
-disjoint deterministic CountSketch blocks
-      │
-fixed projected feature vector
+model JSON patch proposal
+          │
+          ▼
+normalize fenced/plain diff
+          │
+          ▼
+validate bytes, file count, path policy, and diff-header consistency
+          │
+          ▼
+write immutable patch artifact and operation intent
+          │
+          ▼
+git apply --check
+          │
+          ▼
+apply in detached worktree
+          │
+          ▼
+verify changed paths and workspace fingerprint
+          │
+          ▼
+write committed ledger
 ```
 
-The policy applies gated residual fusion so the explicit graph state remains a direct path even when hidden features are noisy.
+A post-mutation validation failure reverses the patch and verifies restoration of the original fingerprint. If the process stops after Git applies a patch but before the commit ledger is written, recovery recognizes the matching operation and completes the ledger without applying the patch twice.
+
+## Worktree isolation
+
+A new repository run requires a clean Git top-level checkout. The base reference is resolved to an immutable commit before a detached worktree is created.
+
+The deterministic worktree path uses:
+
+```text
+workspace-home / sha256(source-path) / sanitized-run-id-plus-hash
+```
+
+The run ID cannot escape the configured root. Existing worktrees are accepted only when they belong to the same Git common directory and remain pinned to the expected commit.
+
+## Verifier integrity
+
+Verifier commands run without a shell. The runtime:
+
+1. Parses the command with `shlex`.
+2. Rejects control operators and substitutions.
+3. Requires an allowlisted executable.
+4. Resolves non-local executables through a sanitized `PATH` that excludes the repository.
+5. Restricts Git to read-only subcommands.
+6. Executes in a new process group with no stdin.
+7. Applies a timeout and bounded stdout/stderr capture.
+8. Stops on the first failed command.
+9. Compares workspace fingerprints before and after verification.
+
+A command sequence that exits zero but changes tracked source is still a failed verifier. The verifier is not a hostile-code sandbox.
+
+## Durable state
+
+`RunState` stores:
+
+- graph name and version
+- task and current node
+- explicit data and artifacts
+- node attempts and edge traversal counts
+- completed-node history
+- model/tool/token/active-time metrics
+- budgets and no-progress state
+- provider and controller identity
+- output and terminal error
+
+SQLite commits each node result and resulting checkpoint in one transaction. An append-only event row records route, stop, edge, masks, and policy-deployment metadata.
+
+Side-effecting nodes do not use ordinary result caching. They implement explicit idempotency boundaries.
+
+## Same-run exclusion
+
+The local runtime holds a non-blocking per-run file lease for the full `run` or `resume` call. This prevents concurrent model calls and checkpoint races for one run. POSIX releases the lease automatically on process death.
+
+Workspace mutation and verifier operations also hold a per-workspace lock.
+
+## Time semantics
+
+The budget records accumulated active execution duration per node. A paused run does not consume `max_seconds` while idle. Audit timestamps still preserve wall-clock start and update times.
 
 ## Transition authority
 
@@ -66,85 +126,73 @@ For every non-terminal node:
 
 1. Evaluate edge predicates from explicit state.
 2. Remove edges that exhausted traversal limits.
-3. Produce explicit and optional hidden policy inputs.
-4. Predict residual route/edge/stop logits, value, and cost.
-5. Apply the hard MLX mask to surviving choices only.
-6. Validate the returned edge against the candidate set again in Python.
+3. Compute the hardcoded baseline over surviving choices.
+4. Optionally compute a learned candidate under the same mask.
+5. Apply shadow, guarded, or active deployment semantics.
+6. Validate the selected edge against the candidate set again.
 7. Commit the node result and transition atomically.
 
-A policy returning a masked or invented edge raises a runtime error.
+A controller returning a masked or invented edge raises a runtime error.
 
-## Repository transaction
+## Learned-policy deployment
+
+The controller maintains two choices:
 
 ```text
-model JSON patch proposal
-          │
-normalize fenced/plain diff
-          │
-validate size, path policy, and diff-header consistency
-          │
-write immutable patch artifact and operation intent
-          │
-git apply --check
-          │
-apply in detached worktree
-          │
-verify declared paths and new fingerprint
-          │
-write committed operation ledger
+baseline  hardcoded graph prior
+candidate learned policy under the same legal mask
 ```
 
-If validation fails after mutation, the runtime reverses the patch and verifies restoration. If the process crashes after application but before the committed ledger, replay recognizes the matching intent and already-applied state rather than applying twice.
+- `shadow`: execute baseline; record candidate.
+- `guarded`: apply candidate only when success, confidence, and margin gates pass.
+- `active`: apply every masked candidate.
 
-## Worktree isolation
+Deployment details are stored with each decision. The audit layer aggregates coverage, disagreements, applied choices, confidence, margins, and fallback reasons. A shadow candidate is counterfactual only; its outcome was not observed.
 
-A new repository run requires a clean Git top-level checkout. The base reference is resolved to an immutable commit before creating a detached worktree. Paths are derived from hashes of the source path and safe run-ID components; run IDs cannot escape configured roots.
+## Hidden-state policy inputs
 
-In-place mode exists for controlled use, but detached worktree mode is the default.
+The optional policy combines:
 
-## Verifier integrity
+- 62 explicit task, budget, progress, repository, verifier, and node features
+- a fixed-size projected Qwen representation, 256 values by default
 
-Verifier commands run without a shell. The runtime parses with `shlex`, rejects shell control syntax, requires an allowlisted executable, resolves through a sanitized `PATH`, restricts Git to read-only subcommands, runs with no stdin in a new process group, enforces time/output bounds, and compares tracked workspace fingerprints before and after the verifier sequence.
+Two scopes are available:
 
-A zero-exit test that mutates tracked source still fails verification.
+```text
+task      one representation for the task/model/extractor tuple
+decision  representation includes bounded current graph state and evidence
+```
 
-The verifier is not a hostile-code sandbox. Repository code runs with local user permissions.
+Decision context is deterministic, depth- and size-bounded, and redacts known secret-bearing keys. Raw prompts and raw hidden tensors are not persisted. The projected artifact is hash-addressed and bound to the model fingerprint and extractor schema.
 
-## Durable state
+The policy predicts route, edge, stop, success value, and normalized costs through gated residual fusion. It cannot unmask an edge, bypass a verifier, increase a traversal limit, or commit an effect.
 
-`RunState` stores graph identity, task, current node, explicit data/artifacts, node attempts, edge traversal counts, completed-node history, model/tool/policy calls, generation and hidden-policy token counts, active-time metrics, budgets, progress state, provider/controller identity, output, and terminal error.
+## Policy identity and resume
 
-SQLite commits each node result and resulting checkpoint in one transaction. Append-only event rows record route, stop, edge, masks, explicit policy vectors, hidden artifact references, and policy metrics.
+Controller identity includes:
 
-Side-effecting nodes are forbidden from ordinary result caching. They implement operation-specific idempotency boundaries.
+- graph schema hash
+- decision backend
+- policy/config/weight identity
+- policy mode, scale, prior weight, and guard thresholds
+- hidden extractor identity and scope
 
-## Hidden artifact integrity
+A resumed run must match its stored provider and controller identity. Changing model, policy weights, hidden scope, or deployment mode requires a new run rather than silently changing semantics mid-execution.
 
-Projected hidden artifacts are immutable and content addressed. References bind:
+## Qualification boundary
 
-- artifact SHA-256
-- model fingerprint
-- hidden extractor schema
-- feature and raw dimensions
-- prompt/task hashes
-- selected layer labels and pooling
+The M5 qualification command checks platform, immutable model identity, model load, capability discovery, hidden-feature determinism, repeated-generation behavior, and MLX memory counters. It writes a content-hashed report.
 
-Export reloads each artifact, checks the hash and metadata, and rejects missing or mixed identities. Raw prompts and raw hidden tensors are not written to the hidden artifact store.
-
-## MLX concurrency model
-
-The direct provider owns a single affinity worker. Model load, generation, hidden extraction, policy construction, policy inference, and masked tensor selection run there. Hidden observations use a bounded LRU keyed by the complete policy-state identity; cache hits do not incur another hidden-prefill token charge. This serializes mutable model/cache access while allowing the asynchronous graph runtime to await it without blocking the event loop.
-
-## Policy training
-
-Training records are split by run ID. The policy predicts route, edge, stop, completion value, and normalized cost. Invalid labels are represented as `-1`; edge and stop losses use the recorded hard masks. The trainer uses AdamW and optional early stopping against held-out runs.
-
-Policy files are bound to graph schema, model fingerprint, hidden extractor schema, and feature dimensions. Resume validation prevents silent policy substitution.
-
-## Same-run exclusion and time semantics
-
-The SQLite runtime holds a non-blocking per-run file lease for the full run or resume call. Individual workspace mutation and test operations also hold workspace locks. Active-time budgets accumulate execution duration only; paused wall-clock time does not consume `max_seconds`.
+An exposed `mtp_forward` method is treated as capability only. The direct v0.5 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
 
 ## Promotion boundary
 
-A successful run exports a cumulative patch from the base commit to the final worktree. Promotion is separate from graph execution and requires completed status, matching base commit, clean source checkout, matching patch SHA-256, revalidation, and idempotent application. The graph cannot promote itself.
+A successful run exports a cumulative patch from the base commit to the final worktree. Promotion is separate from graph execution and requires:
+
+- completed status
+- matching base commit in the source checkout
+- clean source worktree
+- matching patch SHA-256
+- successful revalidation and idempotent application
+
+The graph cannot promote itself.

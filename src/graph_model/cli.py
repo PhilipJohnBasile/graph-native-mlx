@@ -9,6 +9,7 @@ from pathlib import Path
 from .benchmark import run_graph_vs_loop_benchmark
 from .controller import DeterministicGraphController, GraphController
 from .graph import load_default_graph, load_graph
+from .graph_bundle import GraphBundleError, load_graph_source, verify_graph_bundle
 from .models import GraphSpec
 from .provider import MockProvider, ModelProvider, OpenAICompatibleProvider, ProviderError
 from .router_policy import HashedLinearRouter, train_router_file
@@ -68,7 +69,11 @@ def _controller(
 
 
 def _load_selected_graph(path: str | None) -> GraphSpec:
-    return load_graph(path) if path else load_default_graph()
+    if not path:
+        return load_default_graph()
+    supplied = Path(path).expanduser()
+    require_promoted = supplied.is_dir() or supplied.name == "manifest.json"
+    return load_graph_source(supplied, require_promoted_bundle=require_promoted)
 
 
 def _close_provider(provider: ModelProvider | None) -> None:
@@ -506,6 +511,128 @@ def _mlx_doctor_command(args: argparse.Namespace) -> int:
     return 0 if report.get("ready") else 1
 
 
+
+async def _optimize_graph_command(args: argparse.Namespace) -> int:
+    from .graph_search import (
+        ObjectiveWeights,
+        optimize_graph,
+        read_mutations,
+        read_search_cases,
+    )
+
+    provider: ModelProvider | None = None
+    try:
+        graph = _load_selected_graph(args.graph)
+        train_cases = read_search_cases(args.input)
+        validation_cases = (
+            read_search_cases(args.validation_input) if args.validation_input else None
+        )
+        provider = _provider(args.provider)
+        weights = ObjectiveWeights(
+            quality=args.quality_weight,
+            tokens=args.token_weight,
+            llm_calls=args.llm_call_weight,
+            tool_calls=args.tool_call_weight,
+            path_length=args.path_length_weight,
+            active_seconds=args.active_seconds_weight,
+        )
+        mutations = read_mutations(args.mutations, graph) if args.mutations else None
+
+        def controller_factory(candidate: GraphSpec) -> GraphController:
+            return _controller(
+                args.controller,
+                candidate,
+                provider_name=args.provider,
+                provider=provider,
+            )
+
+        report = await optimize_graph(
+            base_graph=graph,
+            train_cases=train_cases,
+            validation_cases=validation_cases,
+            provider=provider,
+            controller_factory=controller_factory,
+            output_dir=args.output_dir,
+            mutations=mutations,
+            weights=weights,
+            iterations=args.iterations,
+            exploration=args.exploration,
+            seed=args.seed,
+            min_validation_improvement=args.min_validation_improvement,
+            allow_in_sample_promotion=args.allow_in_sample_promotion,
+        )
+    except (
+        GraphBundleError,
+        ProviderError,
+        GraphRuntimeError,
+        OSError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
+        return 2
+    finally:
+        _close_provider(provider)
+    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    return 1 if report.get("status") == "rejected" else 0
+
+
+def _verify_graph_bundle_command(args: argparse.Namespace) -> int:
+    try:
+        bundle = verify_graph_bundle(
+            args.bundle,
+            require_promoted=args.require_promoted,
+        )
+    except (GraphBundleError, OSError, ValueError) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
+        return 2
+    print(
+        json.dumps(
+            {
+                "status": "verified",
+                "root": str(bundle.root),
+                "identity": bundle.identity,
+                "promotion_status": bundle.manifest.get("promotion_status"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+async def _qualify_mac_command(args: argparse.Namespace) -> int:
+    from .qualification import qualify_mlx_host
+
+    try:
+        report = await qualify_mlx_host(
+            graph=_load_selected_graph(args.graph),
+            output_dir=args.output_dir,
+            include_generation=not args.skip_generation,
+            include_hidden=not args.skip_hidden,
+            require_apple_silicon=not args.allow_non_apple,
+        )
+    except (GraphBundleError, ProviderError, OSError, ValueError, RuntimeError) as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},
+                indent=2,
+            )
+        )
+        return 2
+    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    return 0 if report.get("passed") else 1
+
 def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--graph")
     parser.add_argument("--db")
@@ -603,6 +730,53 @@ def build_parser() -> argparse.ArgumentParser:
     collect_traces.add_argument("--max-context-bytes", type=int, default=180_000)
     collect_traces.add_argument("--max-patch-bytes", type=int, default=500_000)
     collect_traces.add_argument("--max-patch-files", type=int, default=32)
+
+
+    optimize = subparsers.add_parser(
+        "optimize-graph",
+        help="search constrained graph variants, validate them, and write a hash-verified bundle",
+    )
+    optimize.add_argument("--input", required=True, help="training/search task JSONL")
+    optimize.add_argument("--validation-input", help="independent held-out task JSONL")
+    optimize.add_argument("--output-dir", required=True)
+    optimize.add_argument("--graph")
+    optimize.add_argument("--provider", choices=("mock", "openai", "mlx"), default="mock")
+    optimize.add_argument(
+        "--controller", choices=("auto", "deterministic", "mlx"), default="deterministic"
+    )
+    optimize.add_argument("--mutations", help="optional constrained mutation JSON file")
+    optimize.add_argument("--iterations", type=int, default=8)
+    optimize.add_argument("--exploration", type=float, default=1.2)
+    optimize.add_argument("--seed", type=int, default=42)
+    optimize.add_argument("--min-validation-improvement", type=float, default=0.001)
+    optimize.add_argument("--allow-in-sample-promotion", action="store_true")
+    optimize.add_argument("--quality-weight", type=float, default=1.0)
+    optimize.add_argument("--token-weight", type=float, default=0.02)
+    optimize.add_argument("--llm-call-weight", type=float, default=0.02)
+    optimize.add_argument("--tool-call-weight", type=float, default=0.01)
+    optimize.add_argument("--path-length-weight", type=float, default=0.01)
+    optimize.add_argument("--active-seconds-weight", type=float, default=0.0)
+
+    verify_bundle = subparsers.add_parser(
+        "verify-graph-bundle",
+        help="verify graph, compiled tables, benchmark evidence, and bundle hashes",
+    )
+    verify_bundle.add_argument("--bundle", required=True)
+    verify_bundle.add_argument("--require-promoted", action="store_true")
+
+    qualify = subparsers.add_parser(
+        "qualify-mac",
+        help="load the configured MLX model and qualify generation, hidden capture, and control",
+    )
+    qualify.add_argument("--output-dir", default=".graph-model/qualification")
+    qualify.add_argument("--graph")
+    qualify.add_argument("--skip-generation", action="store_true")
+    qualify.add_argument("--skip-hidden", action="store_true")
+    qualify.add_argument(
+        "--allow-non-apple",
+        action="store_true",
+        help="diagnostic/testing mode; production qualification requires Apple Silicon and Metal",
+    )
 
     resume = subparsers.add_parser("resume", help="resume a checkpointed execution")
     resume.add_argument("--run-id", required=True)
@@ -703,6 +877,12 @@ def main() -> None:
         code = asyncio.run(_benchmark_command(args))
     elif args.command == "collect-traces":
         code = asyncio.run(_collect_traces_command(args))
+    elif args.command == "optimize-graph":
+        code = asyncio.run(_optimize_graph_command(args))
+    elif args.command == "verify-graph-bundle":
+        code = _verify_graph_bundle_command(args)
+    elif args.command == "qualify-mac":
+        code = asyncio.run(_qualify_mac_command(args))
     elif args.command == "resume":
         code = asyncio.run(_resume_command(args))
     elif args.command == "trace":

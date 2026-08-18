@@ -67,6 +67,21 @@ def _workspace(ctx: ExecutionContext) -> RepositoryWorkspace | None:
     return RepositoryWorkspace.from_state_data(ctx.state.data, run_id=ctx.state.run_id)
 
 
+def _node_temperature(ctx: ExecutionContext, default: float) -> float:
+    raw = ctx.node.config.get("temperature", default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"node {ctx.node.id!r} has invalid temperature {raw!r}"
+        ) from exc
+    if not 0.0 <= value <= 2.0:
+        raise ValueError(
+            f"node {ctx.node.id!r} temperature must be in [0, 2], found {value}"
+        )
+    return value
+
+
 def _truncate_middle(value: Any, limit: int) -> str:
     text = str(value or "")
     if len(text) <= limit:
@@ -178,7 +193,7 @@ async def make_plan(ctx: ExecutionContext) -> NodeResult:
     payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
         system=system,
         user=user,
-        temperature=0.0,
+        temperature=_node_temperature(ctx, 0.0),
     )
     steps = payload.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -251,7 +266,7 @@ async def implement(ctx: ExecutionContext) -> NodeResult:
     payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
         system=system,
         user=user,
-        temperature=0.1,
+        temperature=_node_temperature(ctx, 0.1),
     )
     proposal = _patch_proposal(payload, revision=int(ctx.state.data.get("repair_count", 0)))
     return NodeResult(
@@ -289,7 +304,7 @@ async def _implement_simulated(ctx: ExecutionContext) -> NodeResult:
     payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
         system=system,
         user=user,
-        temperature=0.1,
+        temperature=_node_temperature(ctx, 0.1),
     )
     candidate = {
         "result": payload.get("result", "Candidate output produced"),
@@ -505,7 +520,7 @@ async def review(ctx: ExecutionContext) -> NodeResult:
     payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
         system=system,
         user=user,
-        temperature=0.0,
+        temperature=_node_temperature(ctx, 0.0),
     )
     verdict = str(payload.get("verdict", "fail")).lower()
     if verdict not in {"pass", "fail"}:
@@ -588,7 +603,7 @@ async def diagnose(ctx: ExecutionContext) -> NodeResult:
     payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
         system=system,
         user=user,
-        temperature=0.0,
+        temperature=_node_temperature(ctx, 0.0),
     )
     diagnosis = {
         "failed_stage": failed_stage,
@@ -657,7 +672,7 @@ async def repair(ctx: ExecutionContext) -> NodeResult:
     payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
         system=system,
         user=user,
-        temperature=0.1,
+        temperature=_node_temperature(ctx, 0.1),
     )
     proposal = _patch_proposal(payload, revision=repair_count)
     proposal["repair_basis"] = ctx.state.data.get("diagnosis", {})

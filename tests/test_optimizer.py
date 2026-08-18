@@ -23,3 +23,23 @@ def test_mcts_search_selects_better_validated_variant() -> None:
     )
     assert result.reward == 1.0
     assert result.graph.nodes["review"].config["strictness"] == 0.8
+
+
+def test_mcts_does_not_stack_conflicting_mutations_in_one_slot() -> None:
+    graph = load_default_graph()
+    mutations = [
+        SetNodeConfig("review", "strictness", 0.4),
+        SetNodeConfig("review", "strictness", 0.8),
+        SetNodeConfig("review", "strictness", 1.0),
+    ]
+
+    result = mcts_optimize(
+        base_graph=graph,
+        mutations=mutations,
+        evaluator=lambda candidate: float(candidate.nodes["review"].config.get("strictness", 0.0)),
+        iterations=30,
+        seed=3,
+    )
+
+    assert result.evaluations == 4  # base plus one variant for each logical slot value
+    assert all(len(item.mutation_path) <= 1 for item in result.evaluated_candidates)

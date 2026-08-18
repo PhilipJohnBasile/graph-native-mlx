@@ -31,6 +31,15 @@
 - **MLX lazy evaluation**  
   https://ml-explore.github.io/mlx/build/html/usage/lazy_evaluation.html
 
+- **MLX memory management and telemetry**  
+  https://ml-explore.github.io/mlx/build/html/dev/extensions.html#memory-management
+
+- **MLX-LM Qwen3.5 model implementation used by Qwen3.8-family checkpoints**  
+  https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_5.py
+
+- **Official Qwen3.8 repository**  
+  https://github.com/QwenLM/Qwen3.8
+
 ## Durable execution
 
 - **Temporal Event History and replay**  

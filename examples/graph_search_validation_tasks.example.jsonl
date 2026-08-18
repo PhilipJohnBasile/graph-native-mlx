@@ -1,0 +1,4 @@
+{"id":"heldout-fast","task":"quick fix: rename one local helper without changing behavior","expected_status":"completed"}
+{"id":"heldout-deep","task":"design and implement a production-safe schema transition with regression tests","expected_status":"completed"}
+{"id":"heldout-repair","task":"repair the failing validation job [force-fail-once]","expected_status":"completed"}
+{"id":"heldout-bounded","task":"repair the persistently broken check [force-fail-always]","expected_status":"failed"}
