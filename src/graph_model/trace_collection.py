@@ -163,6 +163,7 @@ async def collect_repository_traces(
     provider: ModelProvider,
     controller: GraphController,
     resume_existing: bool = False,
+    retry_collector_errors: bool = False,
     continue_on_error: bool = True,
     workspace_home: str | Path | None = None,
     artifact_root: str | Path | None = None,
@@ -190,7 +191,27 @@ async def collect_repository_traces(
         try:
             existing = store.load_run(task.run_id)
             if existing is not None:
-                if existing.status == "running" and resume_existing:
+                should_resume = existing.status == "running" and resume_existing
+                should_retry_collector_error = (
+                    existing.status == "failed"
+                    and resume_existing
+                    and retry_collector_errors
+                    and str(existing.error or "").startswith("collector error:")
+                )
+                if should_retry_collector_error:
+                    store.reopen_collector_failed_run(task.run_id)
+                    if progress is not None:
+                        progress(
+                            {
+                                "event": "task_retry",
+                                "index": task_index,
+                                "total": len(task_list),
+                                "run_id": task.run_id,
+                                "reason": "collector_error",
+                            }
+                        )
+                    should_resume = True
+                if should_resume:
                     state = await runtime.run(run_id=task.run_id)
                     results.append(
                         _state_summary(
@@ -200,6 +221,15 @@ async def collect_repository_traces(
                             existing=True,
                         )
                     )
+                    if progress is not None:
+                        progress(
+                            {
+                                "event": "task_done",
+                                "index": task_index,
+                                "total": len(task_list),
+                                **results[-1],
+                            }
+                        )
                     continue
                 if existing.status in {"completed", "failed"}:
                     results.append(
@@ -210,6 +240,15 @@ async def collect_repository_traces(
                             existing=True,
                         )
                     )
+                    if progress is not None:
+                        progress(
+                            {
+                                "event": "task_existing",
+                                "index": task_index,
+                                "total": len(task_list),
+                                **results[-1],
+                            }
+                        )
                     continue
                 raise ValueError(
                     f"run {task.run_id!r} already exists; pass resume_existing to continue it"

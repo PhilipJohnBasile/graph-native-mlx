@@ -1,4 +1,4 @@
-# Validation Record — v0.5.3
+# Validation Record — v0.5.5
 
 ## Portable validation environment
 
@@ -9,7 +9,7 @@
 
 ## Completed checks
 
-- 101 portable tests passed
+- 113 portable tests passed across release-validation groups
 - all source and test modules compiled with `compileall`
 - YAML graph validated as 12 nodes, 19 edges, and 2 terminals
 - generated default graph module reproduced from the YAML source
@@ -29,6 +29,10 @@
 - safe run-ID paths, workspace/artifact-root confinement, same-run leases, and active-time budget semantics passed
 - direct MLX provider behavior validated through an injected backend
 - model/tokenizer residency, explicit close, post-close rejection, loader-signature compatibility, chat-template fallback, and complete-JSON extraction passed
+- `GRAPH_PATCH_V1` parsing passed for raw multi-file unified diffs, compact JSON metadata, strict-JSON provider compatibility, marker-order enforcement, and conflicting no-change rejection
+- direct MLX patch generation passed through an injected backend without JSON-escaping the diff, including exactly one deterministic envelope-recovery attempt at temperature 0.0
+- malformed patch failures expose bounded hashes, lengths, marker presence, and truncation signals without persisting or echoing raw model output
+- a real two-file repository change passed patch-native proposal, transactional apply, pytest verification, semantic review, verified patch export, and source-checkout isolation
 - single-worker affinity for model load, generation, hidden extraction, and policy inference passed
 - Qwen final-layer and selected-layer extraction passed through injected model structures
 - both `model.model` and `model.language_model.model` backbone layouts passed
@@ -37,11 +41,14 @@
 - durable policy-call, policy-prefill-token, and transition-latency accounting passed
 - policy binding to graph schema, model fingerprint, extractor schema, dimensions, configuration, and file hashes passed
 - repository trace collection, hidden-required export, homogeneous-dataset enforcement, run-level splitting, AdamW training, early stopping, and best-weight restoration passed
+- collector/provider exceptions are terminalized with explicit evidence instead of leaving stale `running` rows
+- `--retry-collector-errors` reopens only collector-terminalized failures at their uncommitted current node; intentional graph failures remain terminal and completed upstream nodes are not repeated
+- append-only event sequencing remains monotonic when a terminalized collection run is reopened and resumed
 - failed-run route/edge/stop imitation is reward-masked to zero while failed runs remain active for value and cost learning
 - controlled bootstrap corpus generation produced 16 clean Git repositories spanning fast, deep, repair, no-change, completed, and bounded-failure cases without embedding expected labels in the worktree
 - bootstrap collector shell syntax and dedicated trace/export paths passed portable validation
 
-## v0.5 qualification checks
+## v0.5.5 qualification checks
 
 - the Mac qualification workflow was executed through injected provider, diagnostics, hidden-state, and controller backends
 - platform/configuration, model-load, structured-generation, hidden-capture, hard-masked route/stop/edge control, and provider-close stages passed
@@ -84,7 +91,7 @@ The release process additionally validates:
 - installed `graph-model validate`
 - installed graph optimization and bundle verification commands
 - installed `graph-model runs`, `graph-model report`, and `graph-model trace --latest --summary` run-discovery and concise-evidence commands
-- release-wide removal scan for the withdrawn job-application material
+- release-wide source and artifact hygiene scan
 - SHA-256 hashes for the source archive and wheel
 
 ## Hardware validation boundary

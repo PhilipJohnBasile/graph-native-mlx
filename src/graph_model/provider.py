@@ -29,6 +29,26 @@ class ModelProvider(ABC):
     ) -> tuple[dict[str, Any], int, int]:
         """Return parsed JSON, prompt tokens, completion tokens."""
 
+    async def complete_patch(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+    ) -> tuple[dict[str, Any], int, int]:
+        """Return a repository patch proposal.
+
+        Providers with a native raw-text path may override this to avoid embedding
+        a multiline unified diff inside a JSON string. The default remains strict
+        JSON for OpenAI-compatible endpoints and scripted test providers.
+        """
+
+        return await self.complete_json(
+            system=system,
+            user=user,
+            temperature=temperature,
+        )
+
 
 class MockProvider(ModelProvider):
     @property
@@ -266,3 +286,120 @@ def _parse_json_object(content: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ProviderError("model JSON response must be an object")
     return parsed
+
+_PATCH_HEADER = "GRAPH_PATCH_V1"
+_PATCH_META_BEGIN = "GRAPH_PATCH_META_BEGIN"
+_PATCH_META_END = "GRAPH_PATCH_META_END"
+_PATCH_DIFF_BEGIN = "GRAPH_PATCH_DIFF_BEGIN"
+_PATCH_DIFF_END = "GRAPH_PATCH_DIFF_END"
+
+
+def _coerce_model_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                pieces.append(part)
+            elif isinstance(part, dict):
+                value = part.get("text", part.get("content"))
+                if isinstance(value, str):
+                    pieces.append(value)
+        return "".join(pieces)
+    raise ProviderError(f"model content is not text: {type(content).__name__}")
+
+
+def _strip_outer_fence(text: str) -> str:
+    value = text.strip()
+    if value.startswith("```") and value.endswith("```"):
+        value = re.sub(r"^```(?:[a-zA-Z0-9_-]+)?\s*", "", value)
+        value = re.sub(r"\s*```$", "", value)
+    return value.strip()
+
+
+def _validated_patch_mapping(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = payload.get("summary", "")
+    patch = payload.get("patch", "")
+    assumptions = payload.get("assumptions", [])
+    no_changes_needed = payload.get("no_changes_needed", False)
+
+    if not isinstance(summary, str):
+        raise ProviderError("patch proposal summary must be a string")
+    if not isinstance(patch, str):
+        raise ProviderError("patch proposal patch must be a string")
+    if not isinstance(assumptions, list) or not all(
+        isinstance(item, str) for item in assumptions
+    ):
+        raise ProviderError("patch proposal assumptions must be an array of strings")
+    if not isinstance(no_changes_needed, bool):
+        raise ProviderError("patch proposal no_changes_needed must be boolean")
+
+    normalized_patch = patch.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if no_changes_needed:
+        if normalized_patch.strip():
+            raise ProviderError(
+                "no_changes_needed=true requires an empty patch payload"
+            )
+    elif not normalized_patch.strip():
+        raise ProviderError(
+            "no_changes_needed=false requires a non-empty unified diff"
+        )
+
+    return {
+        "summary": summary.strip(),
+        "patch": normalized_patch,
+        "assumptions": assumptions,
+        "no_changes_needed": no_changes_needed,
+    }
+
+
+def _parse_patch_proposal(content: Any) -> dict[str, Any]:
+    """Parse a bounded raw patch envelope or a strict JSON fallback.
+
+    Multiline unified diffs are intentionally kept outside JSON so local models
+    do not need to escape every newline and quote. The envelope carries only a
+    small JSON metadata object and a raw diff block. A strict JSON object remains
+    accepted for providers whose API enforces JSON mode.
+    """
+
+    if isinstance(content, dict):
+        return _validated_patch_mapping(content)
+
+    try:
+        return _validated_patch_mapping(_parse_json_object(content))
+    except ProviderError:
+        pass
+
+    text = _coerce_model_text(content)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _strip_outer_fence(text)
+
+    header = text.rfind(_PATCH_HEADER)
+    if header < 0:
+        raise ProviderError("model did not return a GRAPH_PATCH_V1 envelope")
+
+    meta_begin = text.find(_PATCH_META_BEGIN, header)
+    meta_end = text.find(_PATCH_META_END, meta_begin + len(_PATCH_META_BEGIN))
+    diff_begin = text.find(_PATCH_DIFF_BEGIN, meta_end + len(_PATCH_META_END))
+    diff_end = text.rfind(_PATCH_DIFF_END)
+
+    positions = (meta_begin, meta_end, diff_begin, diff_end)
+    if any(position < 0 for position in positions):
+        raise ProviderError("GRAPH_PATCH_V1 envelope is missing a required marker")
+    if not (header < meta_begin < meta_end < diff_begin < diff_end):
+        raise ProviderError("GRAPH_PATCH_V1 markers are out of order")
+
+    metadata_text = text[
+        meta_begin + len(_PATCH_META_BEGIN) : meta_end
+    ].strip()
+    patch_text = text[
+        diff_begin + len(_PATCH_DIFF_BEGIN) : diff_end
+    ].strip("\n")
+    patch_text = _strip_outer_fence(patch_text)
+
+    metadata = _parse_json_object(metadata_text)
+    payload = dict(metadata)
+    payload["patch"] = patch_text
+    return _validated_patch_mapping(payload)
+

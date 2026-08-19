@@ -215,3 +215,79 @@ async def test_trace_collection_terminalizes_provider_exception(tmp_path: Path) 
     assert persisted is not None
     assert persisted.status == "failed"
     assert persisted.error and "collector error" in persisted.error
+
+
+@pytest.mark.asyncio
+async def test_trace_collection_can_retry_only_collector_terminalized_failure(
+    tmp_path: Path,
+) -> None:
+    class RecoverableProvider(_TraceProvider):
+        def __init__(self) -> None:
+            self.fail_patch = True
+
+        async def complete_json(self, *, system, user, temperature=None):
+            if "repository patch proposal node" in system and self.fail_patch:
+                raise RuntimeError("first structured patch failed")
+            return await super().complete_json(
+                system=system,
+                user=user,
+                temperature=temperature,
+            )
+
+    source = _repo(tmp_path)
+    task = RepositoryTraceTask(
+        run_id="trace-retry-collector-error",
+        task="quick fix: correct the failing add function",
+        repo=str(source),
+        test_commands=(f"{sys.executable} -m pytest -q",),
+    )
+    graph = load_default_graph()
+    store = SQLiteRunStore(tmp_path / "runs.sqlite3")
+    controller = MLXGraphController(
+        graph=graph,
+        decision_backend=PythonDecisionBackend(),
+    )
+    provider = RecoverableProvider()
+
+    first = await collect_repository_traces(
+        tasks=[task],
+        graph=graph,
+        store=store,
+        provider=provider,
+        controller=controller,
+        workspace_home=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        continue_on_error=False,
+    )
+    assert first["status_counts"] == {"collector_error": 1}
+    failed = store.load_run(task.run_id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.error and failed.error.startswith("collector error:")
+    completed_before = list(failed.completed_nodes)
+
+    provider.fail_patch = False
+    progress: list[dict[str, Any]] = []
+    second = await collect_repository_traces(
+        tasks=[task],
+        graph=graph,
+        store=store,
+        provider=provider,
+        controller=controller,
+        resume_existing=True,
+        retry_collector_errors=True,
+        continue_on_error=False,
+        workspace_home=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        progress=progress.append,
+    )
+    assert second["status_counts"] == {"completed": 1}
+    result = second["results"][0]
+    assert result["existing"] is True
+    assert result["status"] == "completed"
+    assert result["completed_nodes"][: len(completed_before)] == completed_before
+    assert result["completed_nodes"].count("intake") == 1
+    assert result["completed_nodes"].count("context") == 1
+    assert progress[1]["event"] == "task_retry"
+    assert any(event["event"] == "task_done" for event in progress)
+    assert any(event["event_type"] == "collector_retry" for event in store.events(task.run_id))

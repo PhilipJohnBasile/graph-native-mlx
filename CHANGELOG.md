@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.5
+
+- Added `GRAPH_PATCH_V1`, a bounded raw-text patch envelope that keeps multiline unified diffs outside JSON while retaining compact JSON metadata and strict JSON compatibility.
+- Added one deterministic patch-envelope recovery attempt at temperature 0.0, with content hashes, marker presence, token counts, and truncation indicators in failures instead of raw model output.
+- Routed repository implementation and repair nodes through the patch-specific provider channel, reducing malformed output on deep multi-file changes without adding an open-ended retry loop.
+- Added `--retry-collector-errors` so a collector-terminalized provider/operator failure can reopen and resume its uncommitted current node while intentional graph failures remain terminal.
+- Made event sequencing monotonic across collector retries, preserving earlier terminal evidence without colliding with resumed node checkpoints.
+- Updated the Apple-Silicon bootstrap collector and in-place upgrade helper to v0.5.5 while retaining completed runs, hidden features, worktrees, and patches.
+
 ## 0.5.4
 
 - Enforced reward-weighted action imitation during MLX policy training: completed runs may teach route/edge/stop actions, while failed runs train only success-value and cost prediction.

@@ -15,4 +15,4 @@ __all__ = [
     "load_graph",
 ]
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"

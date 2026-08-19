@@ -245,12 +245,18 @@ async def implement(ctx: ExecutionContext) -> NodeResult:
     )
     system = (
         "You are the repository patch proposal node in a graph-controlled coding agent. "
-        "Return only one JSON object with keys: summary (string), patch (string), "
-        "assumptions (array of strings), no_changes_needed (boolean). The patch must be a "
-        "complete unified diff containing 'diff --git a/... b/...' headers and paths relative "
-        "to the repository root. Produce text-file changes only. Do not use shell commands, "
-        "do not modify .git or secret files, and do not claim tests passed. A separate apply "
-        "node and verifier own those decisions. Prefer the smallest coherent patch."
+        "Return a GRAPH_PATCH_V1 raw-text envelope, not prose. Use this exact shape: "
+        "GRAPH_PATCH_V1, then GRAPH_PATCH_META_BEGIN, then one compact JSON metadata "
+        "object with keys summary (string), assumptions (array of strings), and "
+        "no_changes_needed (boolean), then GRAPH_PATCH_META_END, then "
+        "GRAPH_PATCH_DIFF_BEGIN, then the raw unified diff, then GRAPH_PATCH_DIFF_END. "
+        "Do not JSON-escape the diff. The diff must contain complete 'diff --git a/... "
+        "b/...' headers and repository-relative paths. Leave the diff block empty only "
+        "when no_changes_needed is true. Produce text-file changes only. Do not use shell "
+        "commands, modify .git or secret files, or claim tests passed. A separate apply "
+        "node and verifier own those decisions. Prefer the smallest coherent patch. "
+        "If an external API forces JSON mode, one strict JSON object with summary, patch, "
+        "assumptions, and no_changes_needed is also accepted."
     )
     user = json.dumps(
         {
@@ -263,7 +269,7 @@ async def implement(ctx: ExecutionContext) -> NodeResult:
         },
         sort_keys=True,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
+    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_patch(
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.1),
@@ -647,12 +653,17 @@ async def repair(ctx: ExecutionContext) -> NodeResult:
         workspace.read_changed_file_context, max_bytes=changed_limit
     )
     system = (
-        "You are the repair patch node in a bounded graph-controlled coding agent. Return only "
-        "one JSON object with keys: summary (string), patch (string), assumptions (array of "
-        "strings), no_changes_needed (boolean). The patch must be a complete unified diff against "
-        "the CURRENT working tree, with 'diff --git a/... b/...' headers. Repair only the diagnosed "
-        "failure. Do not repeat already-applied hunks, do not modify .git or secret files, and do "
-        "not claim tests passed."
+        "You are the repair patch node in a bounded graph-controlled coding agent. "
+        "Return a GRAPH_PATCH_V1 raw-text envelope with compact JSON metadata between "
+        "GRAPH_PATCH_META_BEGIN and GRAPH_PATCH_META_END, followed by the raw unified "
+        "diff between GRAPH_PATCH_DIFF_BEGIN and GRAPH_PATCH_DIFF_END. Metadata keys are "
+        "summary (string), assumptions (array of strings), and no_changes_needed "
+        "(boolean). Do not JSON-escape the diff. The diff must be complete against the "
+        "CURRENT working tree and contain 'diff --git a/... b/...' headers. Leave the "
+        "diff block empty only when no_changes_needed is true. Repair only the diagnosed "
+        "failure. Do not repeat already-applied hunks, modify .git or secret files, or "
+        "claim tests passed. If an external API forces JSON mode, one strict JSON object "
+        "with summary, patch, assumptions, and no_changes_needed is also accepted."
     )
     user = json.dumps(
         {
@@ -669,7 +680,7 @@ async def repair(ctx: ExecutionContext) -> NodeResult:
         },
         sort_keys=True,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
+    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_patch(
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.1),

@@ -140,6 +140,61 @@ class SQLiteRunStore:
             ).fetchone()
         return RunState.model_validate_json(row["state_json"]) if row else None
 
+
+    def reopen_collector_failed_run(self, run_id: str) -> RunState:
+        """Reopen only a run terminalized by the trace collector.
+
+        Intentional graph failures remain terminal. This is reserved for an
+        operator/provider exception that occurred before the current node could
+        checkpoint, so durable execution can retry that same node after a runtime
+        fix without discarding earlier successful steps.
+        """
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state_json FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"run {run_id!r} does not exist")
+            state = RunState.model_validate_json(row["state_json"])
+            prior_error = str(state.error or "")
+            if state.status != "failed" or not prior_error.startswith(
+                "collector error:"
+            ):
+                raise ValueError(
+                    f"run {run_id!r} is not a collector-terminalized failure"
+                )
+            state.status = "running"
+            state.error = None
+            state.updated_at = time.time()
+            connection.execute(
+                "UPDATE runs SET state_json = ?, updated_at = ? WHERE run_id = ?",
+                (state.model_dump_json(), state.updated_at, run_id),
+            )
+            next_seq = connection.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["seq"]
+            connection.execute(
+                "INSERT INTO events(run_id, seq, event_type, node_id, payload_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    next_seq,
+                    "collector_retry",
+                    state.current_node,
+                    json.dumps(
+                        {"status": "running", "prior_error": prior_error},
+                        sort_keys=True,
+                    ),
+                    state.updated_at,
+                ),
+            )
+            connection.commit()
+        return state
+
     def get_step_result(self, run_id: str, node_id: str, input_hash: str) -> NodeResult | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -177,12 +232,16 @@ class SQLiteRunStore:
                 "UPDATE runs SET state_json = ?, updated_at = ? WHERE run_id = ?",
                 (state.model_dump_json(), time.time(), run_id),
             )
+            next_seq = connection.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["seq"]
             connection.execute(
                 "INSERT INTO events(run_id, seq, event_type, node_id, payload_json, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
-                    state.step_count,
+                    next_seq,
                     "node_completed",
                     node_id,
                     json.dumps(payload, sort_keys=True, default=str),

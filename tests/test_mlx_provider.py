@@ -103,6 +103,7 @@ async def test_mlx_provider_loads_once_and_streams_json_in_process() -> None:
     assert backend.tokenizer.messages[0]["role"] == "system"
     assert backend.last_sampler == (0.2, 0.9, 0.05, 20)
     assert provider.loaded is True
+    provider.close()
 
 
 @pytest.mark.asyncio
@@ -113,6 +114,7 @@ async def test_mlx_provider_has_a_role_delimited_template_fallback() -> None:
     assert payload == {"ok": True}
     assert "SYSTEM INSTRUCTIONS:\nSYSTEM" in backend.last_prompt
     assert "USER INPUT:\nUSER" in backend.last_prompt
+    provider.close()
 
 
 @pytest.mark.asyncio
@@ -124,6 +126,7 @@ async def test_mlx_provider_rejects_empty_generation() -> None:
     )
     with pytest.raises(ProviderError, match="empty response"):
         await provider.complete_json(system="system", user="user")
+    provider.close()
 
 
 @pytest.mark.asyncio
@@ -142,6 +145,7 @@ async def test_mlx_provider_falls_back_for_backend_specific_template_errors() ->
     payload, _, _ = await provider.complete_json(system="SYSTEM", user="USER")
     assert payload == {"ok": True}
     assert "SYSTEM INSTRUCTIONS:\nSYSTEM" in backend.last_prompt
+    provider.close()
 
 
 def test_load_kwargs_adapt_to_mlx_lm_0313_signature() -> None:
@@ -352,3 +356,129 @@ async def test_mlx_provider_retries_invalid_json_once_with_strict_recovery() -> 
     assert prompt_tokens == 22
     assert completion_tokens == 6
     assert backend.last_sampler[0] == 0.0
+    provider.close()
+
+
+@pytest.mark.asyncio
+async def test_mlx_provider_uses_raw_patch_envelope_without_json_escaping() -> None:
+    class PatchBackend(FakeMLXLMBackend):
+        def stream_generate(self, model, tokenizer, prompt, *, max_tokens, sampler):
+            del model, tokenizer
+            self.thread_ids.append(get_ident())
+            self.stream_calls += 1
+            self.last_prompt = prompt
+            self.last_sampler = sampler
+            assert max_tokens == 64
+            return [
+                FakeResponse(
+                    """GRAPH_PATCH_V1
+GRAPH_PATCH_META_BEGIN
+{"summary":"Two-file fix","assumptions":[],"no_changes_needed":false}
+GRAPH_PATCH_META_END
+GRAPH_PATCH_DIFF_BEGIN
+diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1 +1 @@
+-old
++new
+diff --git a/b.py b/b.py
+--- a/b.py
++++ b/b.py
+@@ -1 +1 @@
+-before
++after
+GRAPH_PATCH_DIFF_END
+""",
+                    21,
+                    31,
+                )
+            ]
+
+    backend = PatchBackend()
+    provider = MLXLocalProvider(model_path="local/model", max_tokens=64, backend=backend)
+    payload, prompt_tokens, completion_tokens = await provider.complete_patch(
+        system="patch system",
+        user="patch user",
+        temperature=0.2,
+    )
+    assert payload["summary"] == "Two-file fix"
+    assert payload["patch"].count("diff --git") == 2
+    assert (prompt_tokens, completion_tokens) == (21, 31)
+    assert backend.stream_calls == 1
+    assert backend.last_sampler[0] == 0.2
+    provider.close()
+
+
+@pytest.mark.asyncio
+async def test_mlx_provider_retries_invalid_patch_once_with_envelope_recovery() -> None:
+    class PatchRecoveryBackend(FakeMLXLMBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.temperatures: list[float] = []
+
+        def stream_generate(self, model, tokenizer, prompt, *, max_tokens, sampler):
+            del model, tokenizer
+            self.thread_ids.append(get_ident())
+            self.stream_calls += 1
+            self.last_prompt = prompt
+            self.last_sampler = sampler
+            self.temperatures.append(float(sampler[0]))
+            assert max_tokens == 64
+            if self.stream_calls == 1:
+                return [FakeResponse("Here is the patch, but no envelope", 9, 8)]
+            return [
+                FakeResponse(
+                    """GRAPH_PATCH_V1
+GRAPH_PATCH_META_BEGIN
+{"summary":"Recovered","assumptions":[],"no_changes_needed":false}
+GRAPH_PATCH_META_END
+GRAPH_PATCH_DIFF_BEGIN
+diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1 +1 @@
+-old
++new
+GRAPH_PATCH_DIFF_END
+""",
+                    13,
+                    20,
+                )
+            ]
+
+    backend = PatchRecoveryBackend()
+    provider = MLXLocalProvider(model_path="local/model", max_tokens=64, backend=backend)
+    payload, prompt_tokens, completion_tokens = await provider.complete_patch(
+        system="patch system",
+        user="patch user",
+        temperature=0.3,
+    )
+    assert payload["summary"] == "Recovered"
+    assert backend.stream_calls == 2
+    assert backend.temperatures == [0.3, 0.0]
+    assert prompt_tokens == 22
+    assert completion_tokens == 28
+    assert "PATCH ENVELOPE RECOVERY" in backend.tokenizer.messages[0]["content"]
+    provider.close()
+
+
+@pytest.mark.asyncio
+async def test_mlx_provider_patch_failure_reports_bounded_diagnostics_only() -> None:
+    class BrokenPatchBackend(FakeMLXLMBackend):
+        def stream_generate(self, model, tokenizer, prompt, *, max_tokens, sampler):
+            del model, tokenizer, prompt, sampler
+            self.stream_calls += 1
+            return [FakeResponse("TOP-SECRET-RAW-BUT-MALFORMED", 7, max_tokens)]
+
+    backend = BrokenPatchBackend()
+    provider = MLXLocalProvider(model_path="local/model", max_tokens=64, backend=backend)
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.complete_patch(system="patch", user="user")
+    message = str(exc_info.value)
+    assert "after one bounded recovery attempt" in message
+    assert "likely_truncated=true" in message
+    assert "completion_tokens=64" in message
+    assert "TOP-SECRET" not in message
+    assert backend.stream_calls == 2
+    provider.close()

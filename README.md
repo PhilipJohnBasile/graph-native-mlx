@@ -8,7 +8,7 @@ The central rule is:
 
 This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, effects, verification order, budgets, retries, termination, recovery, and promotion.
 
-## v0.5.4 capabilities
+## v0.5.5 capabilities
 
 ### MLX-native model and policy path
 
@@ -30,6 +30,7 @@ This is a compound model rather than a foundation-model pretraining run. The lan
 - Predicate evaluation and traversal caps outside the language model
 - Two bounded local repair passes; no unbounded retry loop
 - Detached per-run Git worktrees by default
+- `GRAPH_PATCH_V1` raw patch envelopes keep multiline diffs outside JSON, with one bounded deterministic recovery and strict JSON compatibility
 - Strict unified-diff validation and sensitive-path blocking
 - Transactional patch application and rollback
 - Idempotent effect ledgers with interruption recovery
@@ -122,8 +123,8 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.5.4.zip
-cd graph-native-model-mlx-v0.5.4
+unzip graph-native-model-mlx-v0.5.5.zip
+cd graph-native-model-mlx-v0.5.5
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -139,10 +140,10 @@ The base package and portable tests work on non-MLX systems. The `mlx` extra is 
 
 The release includes a state-preserving upgrade helper. It keeps the existing virtual environment, `.graph-env`, `.graph-model` database, hidden-state artifacts, detached worktrees, and verified patches, while backing up the prior source tree.
 
-After extracting the v0.5.4 source archive:
+After extracting the v0.5.5 source archive:
 
 ```bash
-cd graph-native-model-mlx-v0.5.4
+cd graph-native-model-mlx-v0.5.5
 ./scripts/upgrade-mac-in-place.sh
 ```
 
@@ -187,7 +188,7 @@ graph-model mlx-doctor
 graph-model mlx-doctor --load-model
 ```
 
-v0.5.4 includes one evidence-producing qualification command:
+v0.5.5 includes one evidence-producing qualification command:
 
 ```bash
 graph-model qualify-mac \
@@ -243,7 +244,7 @@ When an absolute Python command is the active virtual-environment interpreter, t
 
 ### Execution boundary
 
-Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.4 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
+Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.5 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
 
 ## Inspect, promote, clean up, and resume
 
@@ -289,7 +290,7 @@ Resume requires the same graph version, provider identity, controller identity, 
 
 ## Bootstrap the policy-data pipeline
 
-The v0.5.4 source archive includes a controlled 16-repository bootstrap corpus spanning fast, deep, repair, no-change, successful, and bounded-failure executions. It uses a dedicated trace database and never activates weights automatically:
+The v0.5.5 source archive includes a controlled 16-repository bootstrap corpus spanning fast, deep, repair, no-change, successful, and bounded-failure executions. It uses a dedicated trace database and never activates weights automatically:
 
 ```bash
 scripts/collect-bootstrap-policy-corpus-mac.sh
@@ -317,7 +318,7 @@ graph-model collect-traces \
   --output .graph-model/trace-summary.json
 ```
 
-The collector records per-run status, graph path, generation and policy-prefill token costs, policy/tool calls, and distinct hidden artifacts. Existing completed runs are summarized rather than re-executed; resumable runs require `--resume-existing`.
+The collector records per-run status, graph path, generation and policy-prefill token costs, policy/tool calls, and distinct hidden artifacts. Existing completed runs are summarized rather than re-executed; resumable runs require `--resume-existing`. Failures specifically terminalized by the collector can be retried at their uncommitted current node with `--retry-collector-errors`; intentional graph aborts remain terminal.
 
 ## Export and train the fused policy
 

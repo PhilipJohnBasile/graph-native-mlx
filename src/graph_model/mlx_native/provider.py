@@ -12,7 +12,12 @@ from threading import RLock, get_ident
 from typing import Any, Callable, Iterable, Protocol, Sequence, TypeVar
 
 from graph_model.models import RunState
-from graph_model.provider import ModelProvider, ProviderError, _parse_json_object
+from graph_model.provider import (
+    ModelProvider,
+    ProviderError,
+    _parse_json_object,
+    _parse_patch_proposal,
+)
 
 from .hidden_state import (
     DEFAULT_HIDDEN_FEATURE_SIZE,
@@ -562,6 +567,83 @@ class MLXLocalProvider(ModelProvider):
                     self._hidden_cache.popitem(last=False)
             return observation
 
+    def _generate_once_sync(
+        self,
+        model: Any,
+        tokenizer: Any,
+        *,
+        system: str,
+        user: str,
+        temperature: float,
+    ) -> tuple[str, int, int]:
+        prompt = self._render_prompt(tokenizer, system=system, user=user)
+        sampler = self.backend.make_sampler(
+            temperature=temperature,
+            top_p=self.top_p,
+            min_p=self.min_p,
+            top_k=self.top_k,
+        )
+        pieces: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        try:
+            for response in self.backend.stream_generate(
+                model,
+                tokenizer,
+                prompt,
+                max_tokens=self.max_tokens,
+                sampler=sampler,
+            ):
+                value = _response_value(response, "text", "")
+                if isinstance(value, str):
+                    pieces.append(value)
+                prompt_tokens = int(
+                    _response_value(response, "prompt_tokens", prompt_tokens)
+                    or prompt_tokens
+                )
+                completion_tokens = int(
+                    _response_value(response, "generation_tokens", completion_tokens)
+                    or completion_tokens
+                )
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(f"MLX generation failed: {exc}") from exc
+
+        content = "".join(pieces).strip()
+        if not content:
+            raise ProviderError("MLX model generated an empty response")
+        if prompt_tokens <= 0:
+            prompt_tokens = _token_count(tokenizer, prompt, add_special_tokens=True)
+        if completion_tokens <= 0:
+            completion_tokens = _token_count(
+                tokenizer,
+                content,
+                add_special_tokens=False,
+            )
+        return content, prompt_tokens, completion_tokens
+
+    def _generation_diagnostic(
+        self,
+        content: str,
+        completion_tokens: int,
+        *,
+        markers: Sequence[str] = (),
+    ) -> str:
+        marker_state = ",".join(
+            f"{marker}={'yes' if marker in content else 'no'}" for marker in markers
+        )
+        parts = [
+            f"chars={len(content)}",
+            f"completion_tokens={completion_tokens}",
+            f"max_tokens={self.max_tokens}",
+            f"likely_truncated={str(completion_tokens >= self.max_tokens).lower()}",
+            f"sha256={hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]}",
+        ]
+        if marker_state:
+            parts.append(f"markers={marker_state}")
+        return ", ".join(parts)
+
     async def complete_json(
         self,
         *,
@@ -612,51 +694,13 @@ class MLXLocalProvider(ModelProvider):
                     )
                     attempt_temperature = 0.0
 
-                prompt = self._render_prompt(
-                    tokenizer, system=attempt_system, user=attempt_user
-                )
-                sampler = self.backend.make_sampler(
+                content, prompt_tokens, completion_tokens = self._generate_once_sync(
+                    model,
+                    tokenizer,
+                    system=attempt_system,
+                    user=attempt_user,
                     temperature=attempt_temperature,
-                    top_p=self.top_p,
-                    min_p=self.min_p,
-                    top_k=self.top_k,
                 )
-                pieces: list[str] = []
-                prompt_tokens = 0
-                completion_tokens = 0
-                try:
-                    for response in self.backend.stream_generate(
-                        model,
-                        tokenizer,
-                        prompt,
-                        max_tokens=self.max_tokens,
-                        sampler=sampler,
-                    ):
-                        text = _response_value(response, "text", "")
-                        if isinstance(text, str):
-                            pieces.append(text)
-                        prompt_tokens = int(
-                            _response_value(response, "prompt_tokens", prompt_tokens)
-                            or prompt_tokens
-                        )
-                        completion_tokens = int(
-                            _response_value(response, "generation_tokens", completion_tokens)
-                            or completion_tokens
-                        )
-                except ProviderError:
-                    raise
-                except Exception as exc:
-                    raise ProviderError(f"MLX generation failed: {exc}") from exc
-
-                content = "".join(pieces).strip()
-                if not content:
-                    raise ProviderError("MLX model generated an empty response")
-                if prompt_tokens <= 0:
-                    prompt_tokens = _token_count(tokenizer, prompt, add_special_tokens=True)
-                if completion_tokens <= 0:
-                    completion_tokens = _token_count(
-                        tokenizer, content, add_special_tokens=False
-                    )
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
                 try:
@@ -666,13 +710,115 @@ class MLXLocalProvider(ModelProvider):
                     last_error = exc
                     if attempt == 0:
                         continue
+                    diagnostic = self._generation_diagnostic(
+                        content,
+                        completion_tokens,
+                    )
                     raise ProviderError(
-                        "model did not return valid JSON after one bounded recovery attempt"
+                        "model did not return valid JSON after one bounded recovery "
+                        f"attempt ({diagnostic})"
                     ) from exc
                 return parsed, total_prompt_tokens, total_completion_tokens
 
             assert last_error is not None
             raise last_error
+
+    async def complete_patch(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+    ) -> tuple[dict[str, Any], int, int]:
+        return await self._run_on_affinity_async(
+            self._complete_patch_sync,
+            system,
+            user,
+            self.default_temperature if temperature is None else float(temperature),
+        )
+
+    def _complete_patch_sync(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+    ) -> tuple[dict[str, Any], int, int]:
+        if temperature < 0:
+            raise ValueError("temperature must be >= 0")
+        with self._lock:
+            model, tokenizer = self._ensure_loaded()
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            last_error: ProviderError | None = None
+            last_content = ""
+            last_completion_tokens = 0
+
+            for attempt in range(2):
+                if attempt == 0:
+                    attempt_system = system
+                    attempt_user = user
+                    attempt_temperature = temperature
+                else:
+                    attempt_system = (
+                        system
+                        + "\n\nPATCH ENVELOPE RECOVERY: Regenerate the same proposal using "
+                        "exactly this raw-text shape and no Markdown fence:\n"
+                        "GRAPH_PATCH_V1\n"
+                        "GRAPH_PATCH_META_BEGIN\n"
+                        '{"summary":"...","assumptions":[],"no_changes_needed":false}\n'
+                        "GRAPH_PATCH_META_END\n"
+                        "GRAPH_PATCH_DIFF_BEGIN\n"
+                        "<raw unified diff; do not JSON-escape it>\n"
+                        "GRAPH_PATCH_DIFF_END\n"
+                        "Use an empty diff block only when no_changes_needed is true."
+                    )
+                    attempt_user = (
+                        user
+                        + "\n\nThe prior response could not be parsed. Regenerate from the "
+                        "original task and evidence. Do not quote or discuss the prior response."
+                    )
+                    attempt_temperature = 0.0
+
+                content, prompt_tokens, completion_tokens = self._generate_once_sync(
+                    model,
+                    tokenizer,
+                    system=attempt_system,
+                    user=attempt_user,
+                    temperature=attempt_temperature,
+                )
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
+                last_content = content
+                last_completion_tokens = completion_tokens
+                try:
+                    parsed = _parse_patch_proposal(content)
+                except ProviderError as exc:
+                    last_error = exc
+                    if attempt == 0:
+                        continue
+                    diagnostic = self._generation_diagnostic(
+                        content,
+                        completion_tokens,
+                        markers=(
+                            "GRAPH_PATCH_V1",
+                            "GRAPH_PATCH_META_BEGIN",
+                            "GRAPH_PATCH_META_END",
+                            "GRAPH_PATCH_DIFF_BEGIN",
+                            "GRAPH_PATCH_DIFF_END",
+                        ),
+                    )
+                    raise ProviderError(
+                        "model did not return a valid patch envelope after one bounded "
+                        f"recovery attempt ({diagnostic})"
+                    ) from exc
+                return parsed, total_prompt_tokens, total_completion_tokens
+
+            assert last_error is not None
+            diagnostic = self._generation_diagnostic(
+                last_content,
+                last_completion_tokens,
+            )
+            raise ProviderError(f"invalid patch proposal ({diagnostic})") from last_error
 
 
     def _release_sync(self) -> None:

@@ -196,6 +196,7 @@ async def _collect_traces_command(args: argparse.Namespace) -> int:
             provider=provider,
             controller=controller,
             resume_existing=args.resume_existing,
+            retry_collector_errors=args.retry_collector_errors,
             continue_on_error=not args.stop_on_error,
             workspace_home=args.workspace_home,
             artifact_root=args.artifact_root,
@@ -777,6 +778,14 @@ def build_parser() -> argparse.ArgumentParser:
     collect_traces.add_argument("--output", help="optional JSON summary path")
     collect_traces.add_argument("--run-prefix", default="mlx-trace")
     collect_traces.add_argument("--resume-existing", action="store_true")
+    collect_traces.add_argument(
+        "--retry-collector-errors",
+        action="store_true",
+        help=(
+            "reopen only failures terminalized by the trace collector and retry "
+            "their uncommitted current node"
+        ),
+    )
     collect_traces.add_argument("--stop-on-error", action="store_true")
     _add_runtime_options(collect_traces)
     collect_traces.add_argument("--workspace-home")
