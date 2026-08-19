@@ -140,7 +140,7 @@ def _policy_report(
         compatibility_ok = True
         compatibility_error = None
         if (
-            policy_config.requires_hidden
+            policy_config.requires_backbone_features
             and hidden_schema_hash
             and policy_config.hidden_state_schema_hash != hidden_schema_hash
         ):
@@ -153,7 +153,7 @@ def _policy_report(
         report["validation"] = {
             "ok": compatibility_ok,
             "format_version": policy_config.format_version,
-            "requires_hidden": policy_config.requires_hidden,
+            "requires_hidden": policy_config.requires_backbone_features,
             "explicit_feature_size": policy_config.input_size,
             "hidden_feature_size": policy_config.backbone_feature_size,
             "hidden_state_schema_hash": policy_config.hidden_state_schema_hash,

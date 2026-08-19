@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed an `mlx-doctor` false negative that referenced the nonexistent `GraphPolicyConfig.requires_hidden` attribute after a hidden-fusion policy had already loaded successfully. Diagnostics now use the canonical `requires_backbone_features` property and include regressions for valid hidden-policy configuration and extractor-schema mismatch.
+
+
 ## 0.5.6
 
 - Disabled Qwen thinking by default for bounded structured JSON and patch generation through the tokenizer chat-template control, with a compatibility fallback for tokenizers that do not expose `enable_thinking`.
