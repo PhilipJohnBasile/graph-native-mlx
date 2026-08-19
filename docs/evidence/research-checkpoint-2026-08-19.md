@@ -72,7 +72,7 @@ All four completed and verified the same final patch, but intermediate prompt/mo
 
 Conclusion: exact intermediate-generation equality is too strong to use as a safety gate for this MLX/Qwen stack. Outcome-level verification must be evaluated statistically across repeated trials.
 
-## Current experiment: statistical policy evaluation v1
+## Statistical policy evaluation v1
 
 Evaluation root:
 
@@ -95,19 +95,35 @@ Selected cases:
 - no-change: `nochange-safe-divide`
 - impossible: `impossible-default-region`, `impossible-mode-label`
 
-### Partial checkpoint from the running evaluation
+### Historical in-progress checkpoint
 
-At the captured checkpoint, 84/120 executions had completed (70%):
+At the earlier captured checkpoint, 84/120 executions had completed. That partial checkpoint is retained as provenance only and is superseded by the final result below.
 
-- repetition 1: static + full complete
-- repetition 2: static + full complete
-- repetition 3: static + full complete
-- repetition 4: full complete
-- repetition 4: static started
+### Final result
 
-So far the ordinary tasks continue to complete and the two impossible contracts continue to terminate through the intended bounded abort rather than false success. This is an in-progress observation only; no final statistical conclusion should be drawn until all 120 runs and the final report are complete.
+All 120 executions completed:
 
-The full-policy arm is loading candidate `855e378570a9`; the static arm reports `hardcoded-priors-only`, confirming that the experiment is comparing the intended controller configurations.
+- static: 60/60 correct
+- full policy: 60/60 correct
+- false successes: 0 in both arms
+- correct gain: 0
+- route changes: 0/60 paired trials
+- final patch changes: 0/60 paired trials
+- mean token delta, full minus static: -1.0 token
+- mean LLM-call delta: 0.000
+- mean repair delta: 0.000
+- mean step delta: 0.000
+- safety gate: passed
+- benefit gate: not demonstrated
+- classification: `safe-but-no-demonstrated-benefit`
+
+The two impossible contracts continued to terminate through the intended bounded abort. Their terminal `failed` statuses are expected correct outcomes.
+
+The full-policy arm loaded candidate `855e378570a9`; the static arm used `hardcoded-priors-only`, confirming the intended comparison.
+
+Full final evidence:
+
+`docs/evidence/statistical-policy-eval-v1-results.md`
 
 ## Current methodological rule
 
@@ -126,8 +142,19 @@ Do not use byte-identical model generations as the decisive comparison for stoch
 
 A learned policy should not be promoted merely because it is safe. It must demonstrate a reproducible benefit over the static controller without degrading verified success or bounded-failure correctness.
 
-## Next expected decision
+## Candidate disposition
 
-When the 120-run evaluation completes, archive the complete evaluation before any new training or activation decision.
+Archive candidate `855e378570a9` as:
 
-If the final result is `safe-but-no-demonstrated-benefit`, archive candidate `855e378570a9` as safe-but-inert and train a candidate v2 using genuine multi-choice graph decisions rather than forced or effectively deterministic transitions.
+```text
+safe on measured evaluations
+no demonstrated benefit
+not activated
+not promoted
+```
+
+Do not activate or retrain it in place.
+
+## Next decision
+
+Train candidate v2 using genuine multi-choice graph decisions rather than forced or effectively deterministic transitions. Candidate v2 must be evaluated against the same repeated statistical harness before any activation decision.
