@@ -1,0 +1,3 @@
+9ba4facb31ed1e7aa45a87fce66362b63fc4d69298c2890593fdd479c6115239  graph-native-model-mlx-v0.5.7.zip
+a4f9584c22df67a5bacb0e1f72cdfdea0c3e739529269657c46e93bbef4e80f4  graph_native_model-0.5.7-py3-none-any.whl
+0cfca138b6f9f9f8e037614f3f35cfb72f107fa27c582245d5f09f4f35443a26  graph-native-model-mlx-v0.5.7-release.json
