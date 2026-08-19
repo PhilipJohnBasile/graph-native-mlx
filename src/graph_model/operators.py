@@ -7,8 +7,19 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_oracle import evaluate_contract_oracle
 from .controller import GraphController, route_difficulty
 from .models import NodeResult, NodeSpec, RunState
+from .paired_eval import (
+    PairedEvaluationConfig,
+    canonicalize_prompt_value,
+    complete_json_with_seed,
+    complete_patch_with_seed,
+    deterministic_generation_seed,
+    logical_idempotency_key,
+    prompt_audit_artifact_key,
+    prompt_audit_record,
+)
 from .provider import ModelProvider
 from .workspace import PatchError, RepositoryWorkspace, WorkspaceError
 
@@ -125,6 +136,79 @@ def _prompt_evidence_limits(workspace: RepositoryWorkspace) -> tuple[int, int]:
     )
 
 
+def _prepare_model_call(
+    ctx: ExecutionContext,
+    *,
+    system: str,
+    payload: dict[str, Any],
+    call_kind: str,
+    revision: int,
+) -> tuple[str, int | None, dict[str, Any]]:
+    paired = PairedEvaluationConfig.from_state(ctx.state)
+    prompt_payload = (
+        canonicalize_prompt_value(payload, ctx.state)
+        if paired.enabled
+        else payload
+    )
+    user = json.dumps(
+        prompt_payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":") if paired.enabled else None,
+    )
+    seed = deterministic_generation_seed(
+        ctx.state,
+        node_id=ctx.node.id,
+        call_kind=call_kind,
+        revision=revision,
+        system=system,
+        user=user,
+    )
+    audit = prompt_audit_record(
+        ctx.state,
+        node_id=ctx.node.id,
+        call_kind=call_kind,
+        revision=revision,
+        system=system,
+        user=user,
+        seed=seed,
+    )
+    artifacts: dict[str, Any] = {}
+    if audit is not None:
+        artifacts[
+            prompt_audit_artifact_key(
+                node_id=ctx.node.id,
+                call_kind=call_kind,
+                revision=revision,
+            )
+        ] = audit
+    return user, seed, artifacts
+
+
+def _normalized_review(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    verdict = str(payload.get("verdict", "fail")).lower()
+    if verdict not in {"pass", "fail"}:
+        verdict = "fail"
+    try:
+        confidence = float(payload.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = min(1.0, max(0.0, confidence))
+    if verdict == "pass" and confidence < 0.5:
+        verdict = "fail"
+    reasons = payload.get("reasons", [])
+    if not isinstance(reasons, list):
+        reasons = [str(reasons)]
+    return {
+        "verdict": verdict,
+        "reasons": [str(reason) for reason in reasons],
+        "confidence": confidence,
+    }
+
+
 async def route_task(ctx: ExecutionContext) -> NodeResult:
     decision = ctx.controller.select_route(ctx.state.task, ctx.state)
     route = decision.route
@@ -182,18 +266,24 @@ async def make_plan(ctx: ExecutionContext) -> NodeResult:
         "steps (array of concise steps), risks (array), acceptance_tests (array). "
         "Do not perform the task; produce an inspectable execution plan."
     )
-    user = json.dumps(
-        {
+    revision = int(ctx.state.data.get("plan_revision_count", 0))
+    user, seed, audit_artifacts = _prepare_model_call(
+        ctx,
+        system=system,
+        payload={
             "task": ctx.state.task,
             "context": ctx.state.data.get("context_summary", {}),
             "prior_plan": ctx.state.data.get("plan"),
         },
-        sort_keys=True,
+        call_kind="plan",
+        revision=revision,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
+    payload, prompt_tokens, completion_tokens = await complete_json_with_seed(
+        ctx.provider,
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.0),
+        seed=seed,
     )
     steps = payload.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -210,7 +300,7 @@ async def make_plan(ctx: ExecutionContext) -> NodeResult:
     }
     return NodeResult(
         delta={"plan": plan, "verdict": "pending"},
-        artifacts={"plan.json": plan},
+        artifacts={"plan.json": plan, **audit_artifacts},
         progress_key=f"plan:{_stable_key(plan)}",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -258,30 +348,41 @@ async def implement(ctx: ExecutionContext) -> NodeResult:
         "If an external API forces JSON mode, one strict JSON object with summary, patch, "
         "assumptions, and no_changes_needed is also accepted."
     )
-    user = json.dumps(
-        {
+    revision = int(ctx.state.data.get("repair_count", 0))
+    user, seed, audit_artifacts = _prepare_model_call(
+        ctx,
+        system=system,
+        payload={
             "task": ctx.state.task,
             "route": ctx.state.data.get("route", "deep"),
             "context": ctx.state.data.get("context_summary", {}),
             "plan": ctx.state.data.get("plan"),
             "current_workspace": evidence,
-            "idempotency_key": ctx.idempotency_key,
+            "idempotency_key": logical_idempotency_key(
+                ctx.state,
+                node_id=ctx.node.id,
+                revision=revision,
+                fallback=ctx.idempotency_key,
+            ),
         },
-        sort_keys=True,
+        call_kind="implement",
+        revision=revision,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_patch(
+    payload, prompt_tokens, completion_tokens = await complete_patch_with_seed(
+        ctx.provider,
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.1),
+        seed=seed,
     )
-    proposal = _patch_proposal(payload, revision=int(ctx.state.data.get("repair_count", 0)))
+    proposal = _patch_proposal(payload, revision=revision)
     return NodeResult(
         delta={
             "pending_patch": proposal,
             "candidate_proposal": proposal,
             "verdict": "pending",
         },
-        artifacts={"candidate-proposal.json": proposal},
+        artifacts={"candidate-proposal.json": proposal, **audit_artifacts},
         progress_key=f"patch-proposal:{_stable_key(proposal)}",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -296,31 +397,42 @@ async def _implement_simulated(ctx: ExecutionContext) -> NodeResult:
         "result (string), changed_items (array), assumptions (array). Follow the supplied plan when present. "
         "Do not claim tests passed; a separate verifier owns that decision."
     )
-    user = json.dumps(
-        {
+    revision = int(ctx.state.data.get("repair_count", 0))
+    user, seed, audit_artifacts = _prepare_model_call(
+        ctx,
+        system=system,
+        payload={
             "task": ctx.state.task,
             "route": route,
             "context": ctx.state.data.get("context_summary", {}),
             "plan": plan,
             "repair_guidance": ctx.state.data.get("diagnosis"),
-            "idempotency_key": ctx.idempotency_key,
+            "idempotency_key": logical_idempotency_key(
+                ctx.state,
+                node_id=ctx.node.id,
+                revision=revision,
+                fallback=ctx.idempotency_key,
+            ),
         },
-        sort_keys=True,
+        call_kind="implement-simulated",
+        revision=revision,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
+    payload, prompt_tokens, completion_tokens = await complete_json_with_seed(
+        ctx.provider,
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.1),
+        seed=seed,
     )
     candidate = {
         "result": payload.get("result", "Candidate output produced"),
         "changed_items": payload.get("changed_items", []),
         "assumptions": payload.get("assumptions", []),
-        "revision": int(ctx.state.data.get("repair_count", 0)),
+        "revision": revision,
     }
     return NodeResult(
         delta={"candidate": candidate, "verdict": "pending"},
-        artifacts={"candidate.json": candidate},
+        artifacts={"candidate.json": candidate, **audit_artifacts},
         progress_key=f"candidate:{_stable_key(candidate)}",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -490,11 +602,13 @@ async def review(ctx: ExecutionContext) -> NodeResult:
 
     workspace = _workspace(ctx)
     current_evidence: dict[str, Any] | None = None
+    changed_files: list[str] = []
     if workspace is not None:
         evidence_limit, _ = _prompt_evidence_limits(workspace)
         current_evidence = await asyncio.to_thread(
             workspace.current_evidence, max_diff_bytes=evidence_limit
         )
+        changed_files = list(current_evidence.get("changed_files") or [])
         test_fingerprint = (ctx.state.data.get("test_report") or {}).get(
             "workspace_fingerprint"
         )
@@ -508,51 +622,145 @@ async def review(ctx: ExecutionContext) -> NodeResult:
                 progress_key=f"review:stale:{_stable_key(current_evidence)}",
             )
 
+    revision = int(ctx.state.data.get("repair_count", 0))
     system = (
         "You are a semantic verifier, not the executor. Return only JSON with keys: "
         "verdict ('pass' or 'fail'), reasons (array), confidence (number 0..1). "
         "Reject unsupported claims, objective mismatches, incomplete patches, and changes that "
-        "only make tests pass without satisfying the requested behavior."
+        "only make tests pass without satisfying the requested behavior. Evaluate the complete "
+        "repository evidence, including unchanged files represented in the supplied context; do "
+        "not assume an unchanged file lacks behavior merely because it is absent from the diff."
     )
-    user = json.dumps(
-        {
+    user, seed, audit_artifacts = _prepare_model_call(
+        ctx,
+        system=system,
+        payload={
             "task": ctx.state.task,
             "candidate": ctx.state.data.get("candidate"),
+            "context": ctx.state.data.get("context_summary", {}),
             "test_report": _compact_test_report(ctx.state.data.get("test_report")),
             "workspace_evidence": current_evidence,
         },
-        sort_keys=True,
+        call_kind="review-initial",
+        revision=revision,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
+    payload, prompt_tokens, completion_tokens = await complete_json_with_seed(
+        ctx.provider,
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.0),
+        seed=seed,
     )
-    verdict = str(payload.get("verdict", "fail")).lower()
-    if verdict not in {"pass", "fail"}:
-        verdict = "fail"
-    try:
-        confidence = float(payload.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = min(1.0, max(0.0, confidence))
-    if verdict == "pass" and confidence < 0.5:
-        verdict = "fail"
+    initial = _normalized_review(payload)
+    final = dict(initial)
+    oracle: dict[str, Any] | None = None
+    appeal: dict[str, Any] | None = None
+    total_prompt_tokens = prompt_tokens
+    total_completion_tokens = completion_tokens
+
+    oracle_spec = ctx.state.data.get("contract_oracle")
+    if initial["verdict"] == "fail" and workspace is not None and oracle_spec is not None:
+        try:
+            oracle = await asyncio.to_thread(
+                evaluate_contract_oracle,
+                oracle_spec,
+                worktree=workspace.active_root,
+                changed_files=changed_files,
+                test_report=ctx.state.data.get("test_report"),
+            )
+        except (OSError, ValueError, SyntaxError) as exc:
+            oracle = {
+                "format": "graph-native-contract-oracle-v1",
+                "verdict": "inconclusive",
+                "definitive": False,
+                "checks": [],
+                "reason": f"oracle execution failed safely: {type(exc).__name__}: {exc}",
+            }
+
+        if oracle.get("verdict") == "pass" and oracle.get("authoritative") is True:
+            final = {
+                "verdict": "pass",
+                "reasons": [
+                    "A complete declarative contract oracle passed every configured check.",
+                    "The initial semantic rejection was overruled only for this explicitly authoritative evaluation contract.",
+                ],
+                "confidence": 1.0,
+            }
+        elif oracle.get("verdict") == "pass":
+            appeal_system = (
+                "You are the independent appeal verifier for a graph-controlled coding agent. "
+                "Return only JSON with keys verdict ('pass' or 'fail'), reasons (array), and "
+                "confidence (number 0..1). A deterministic declarative contract oracle has "
+                "checked concrete repository facts. Treat each passing oracle check as "
+                "authoritative for that fact. Re-evaluate the initial semantic rejection against "
+                "the full task, tests, current diff, unchanged-file context, and oracle evidence. "
+                "Do not repeat a claim contradicted by a passing oracle check. Fail only for a "
+                "remaining, evidence-supported objective or safety defect."
+            )
+            appeal_user, appeal_seed, appeal_audits = _prepare_model_call(
+                ctx,
+                system=appeal_system,
+                payload={
+                    "task": ctx.state.task,
+                    "candidate": ctx.state.data.get("candidate"),
+                    "context": ctx.state.data.get("context_summary", {}),
+                    "test_report": _compact_test_report(ctx.state.data.get("test_report")),
+                    "workspace_evidence": current_evidence,
+                    "initial_review": initial,
+                    "contract_oracle": oracle,
+                },
+                call_kind="review-appeal",
+                revision=revision,
+            )
+            appeal_payload, appeal_prompt, appeal_completion = await complete_json_with_seed(
+                ctx.provider,
+                system=appeal_system,
+                user=appeal_user,
+                temperature=0.0,
+                seed=appeal_seed,
+            )
+            appeal = _normalized_review(appeal_payload)
+            final = dict(appeal)
+            total_prompt_tokens += appeal_prompt
+            total_completion_tokens += appeal_completion
+            audit_artifacts.update(appeal_audits)
+
     review_data = {
-        "verdict": verdict,
-        "reasons": payload.get("reasons", []),
-        "confidence": confidence,
+        "verdict": final["verdict"],
+        "reasons": final["reasons"],
+        "confidence": final["confidence"],
         "workspace_fingerprint": (
             current_evidence.get("workspace_fingerprint") if current_evidence else None
         ),
+        "initial": initial,
+        "contract_oracle": oracle,
+        "appeal": appeal,
+        "adjudicated": (appeal is not None) or (
+            oracle is not None
+            and oracle.get("verdict") == "pass"
+            and oracle.get("authoritative") is True
+        ),
+        "adjudication_mode": (
+            "authoritative-contract-oracle"
+            if oracle is not None
+            and oracle.get("verdict") == "pass"
+            and oracle.get("authoritative") is True
+            else "independent-appeal"
+            if appeal is not None
+            else "initial-review"
+        ),
     }
+    verdict = str(review_data["verdict"])
     return NodeResult(
         delta={"verdict": verdict, "review": review_data},
-        artifacts={f"review-{ctx.state.data.get('repair_count', 0)}.json": review_data},
+        artifacts={
+            f"review-{revision}.json": review_data,
+            **audit_artifacts,
+        },
         verdict=verdict,
         progress_key=f"review:{verdict}:{_stable_key(review_data)}",
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
     )
 
 
@@ -590,11 +798,16 @@ async def diagnose(ctx: ExecutionContext) -> NodeResult:
     system = (
         "You are the failure diagnosis node in a graph-controlled coding agent. Return only JSON "
         "with keys: root_causes (array), repair_steps (array), files_to_change (array), "
-        "evidence (array). Diagnose from the exact patch, command output, and semantic review. "
-        "Do not propose restarting the whole task and do not claim a repair has already worked."
+        "evidence (array). Diagnose from the exact patch, command output, semantic review, and "
+        "any deterministic contract-oracle adjudication. Do not repeat a semantic-review claim "
+        "that a passing oracle check disproves. Do not propose restarting the whole task and do "
+        "not claim a repair has already worked."
     )
-    user = json.dumps(
-        {
+    revision = int(ctx.state.data.get("repair_count", 0))
+    user, seed, audit_artifacts = _prepare_model_call(
+        ctx,
+        system=system,
+        payload={
             "task": ctx.state.task,
             "failed_stage": failed_stage,
             "candidate_proposal": ctx.state.data.get("candidate_proposal"),
@@ -603,13 +816,17 @@ async def diagnose(ctx: ExecutionContext) -> NodeResult:
             "review": ctx.state.data.get("review"),
             "workspace_evidence": evidence,
             "changed_file_context": changed_context,
+            "context": ctx.state.data.get("context_summary", {}),
         },
-        sort_keys=True,
+        call_kind="diagnose",
+        revision=revision,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_json(
+    payload, prompt_tokens, completion_tokens = await complete_json_with_seed(
+        ctx.provider,
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.0),
+        seed=seed,
     )
     diagnosis = {
         "failed_stage": failed_stage,
@@ -621,7 +838,10 @@ async def diagnose(ctx: ExecutionContext) -> NodeResult:
     }
     return NodeResult(
         delta={"diagnosis": diagnosis},
-        artifacts={f"diagnosis-{ctx.state.data.get('repair_count', 0)}.json": diagnosis},
+        artifacts={
+            f"diagnosis-{revision}.json": diagnosis,
+            **audit_artifacts,
+        },
         progress_key=f"diagnosis:{_stable_key(diagnosis)}",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -661,12 +881,16 @@ async def repair(ctx: ExecutionContext) -> NodeResult:
         "(boolean). Do not JSON-escape the diff. The diff must be complete against the "
         "CURRENT working tree and contain 'diff --git a/... b/...' headers. Leave the "
         "diff block empty only when no_changes_needed is true. Repair only the diagnosed "
-        "failure. Do not repeat already-applied hunks, modify .git or secret files, or "
-        "claim tests passed. If an external API forces JSON mode, one strict JSON object "
-        "with summary, patch, assumptions, and no_changes_needed is also accepted."
+        "failure. Deterministic contract-oracle evidence is authoritative for the concrete "
+        "facts it checks; do not modify code to satisfy a review claim that the oracle disproves. "
+        "Do not repeat already-applied hunks, modify .git or secret files, or claim tests passed. "
+        "If an external API forces JSON mode, one strict JSON object with summary, patch, "
+        "assumptions, and no_changes_needed is also accepted."
     )
-    user = json.dumps(
-        {
+    user, seed, audit_artifacts = _prepare_model_call(
+        ctx,
+        system=system,
+        payload={
             "task": ctx.state.task,
             "repair_number": repair_count,
             "diagnosis": ctx.state.data.get("diagnosis"),
@@ -678,12 +902,15 @@ async def repair(ctx: ExecutionContext) -> NodeResult:
             "changed_file_context": changed_context,
             "original_context": ctx.state.data.get("context_summary", {}),
         },
-        sort_keys=True,
+        call_kind="repair",
+        revision=repair_count,
     )
-    payload, prompt_tokens, completion_tokens = await ctx.provider.complete_patch(
+    payload, prompt_tokens, completion_tokens = await complete_patch_with_seed(
+        ctx.provider,
         system=system,
         user=user,
         temperature=_node_temperature(ctx, 0.1),
+        seed=seed,
     )
     proposal = _patch_proposal(payload, revision=repair_count)
     proposal["repair_basis"] = ctx.state.data.get("diagnosis", {})
@@ -694,7 +921,10 @@ async def repair(ctx: ExecutionContext) -> NodeResult:
             "candidate_proposal": proposal,
             "verdict": "pending",
         },
-        artifacts={f"repair-proposal-{repair_count}.json": proposal},
+        artifacts={
+            f"repair-proposal-{repair_count}.json": proposal,
+            **audit_artifacts,
+        },
         progress_key=f"repair-proposal:{repair_count}:{_stable_key(proposal)}",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

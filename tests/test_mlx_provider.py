@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 from threading import get_ident
+import sys
+import types
 
 import pytest
 
@@ -627,4 +629,31 @@ async def test_mlx_provider_patch_failure_reports_bounded_diagnostics_only() -> 
     assert "completion_tokens=64" in message
     assert "TOP-SECRET" not in message
     assert backend.stream_calls == 2
+    provider.close()
+
+
+@pytest.mark.asyncio
+async def test_mlx_seeded_generation_resets_mlx_rng(monkeypatch) -> None:
+    seeds: list[int] = []
+    core = types.ModuleType("mlx.core")
+    core.random = types.SimpleNamespace(seed=lambda value: seeds.append(int(value)))
+    mlx = types.ModuleType("mlx")
+    mlx.core = core
+    monkeypatch.setitem(sys.modules, "mlx", mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+
+    backend = FakeMLXLMBackend()
+    provider = MLXLocalProvider(
+        model_path="local/model",
+        max_tokens=64,
+        backend=backend,
+    )
+    payload, _, _ = await provider.complete_json_seeded(
+        system="system",
+        user="user",
+        temperature=0.0,
+        seed=123456,
+    )
+    assert payload == {"ok": True}
+    assert seeds == [123456]
     provider.close()

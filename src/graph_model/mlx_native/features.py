@@ -4,6 +4,7 @@ import math
 from typing import Iterable
 
 from graph_model.models import GraphSpec, NodeKind, RunState
+from graph_model.paired_eval import paired_elapsed_seconds
 
 from .graph_tables import CompiledGraphTables
 
@@ -143,7 +144,7 @@ def state_features(
         _ratio(state.metrics.llm_calls, state.budget.max_llm_calls),
         _ratio(state.metrics.tool_calls, state.budget.max_tool_calls),
         _ratio(state.metrics.total_tokens, state.budget.max_tokens),
-        _ratio(state.metrics.elapsed_seconds, state.budget.max_seconds),
+        _ratio(paired_elapsed_seconds(state), state.budget.max_seconds),
         _ratio(state.no_progress_count, state.budget.max_no_progress_steps),
         min(1.0, int(state.data.get("repair_count", 0)) / 2.0),
         min(1.0, int(state.data.get("plan_revision_count", 0)) / 2.0),

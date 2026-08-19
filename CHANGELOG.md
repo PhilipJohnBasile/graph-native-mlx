@@ -1,9 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.5.7
 
+- Added causal paired evaluation with static, shadow, route-only, and full-policy arms.
+- Canonicalized model-visible run IDs and filesystem paths while retaining real runtime identity for Git, effects, and checkpoints.
+- Added hash-only prompt audit artifacts and prompt-derived deterministic MLX seed resets for paired generation.
+- Added independent route and transition policy scales plus forced-choice policy-prefill skipping and meaningful-choice telemetry.
+- Added declarative contract oracles for deterministic tests, changed-file contracts, final newlines, and Python AST call relationships.
+- Added explicit authoritative evaluation-contract adjudication and non-authoritative independent appeal review.
+- Added shared held-out fixture generation, a one-command M5 Max four-arm runner, and a strict evidence comparator.
+- Preserved the existing coding-supergraph schema so previously trained graph-bound candidates remain load-compatible.
 - Fixed an `mlx-doctor` false negative that referenced the nonexistent `GraphPolicyConfig.requires_hidden` attribute after a hidden-fusion policy had already loaded successfully. Diagnostics now use the canonical `requires_backbone_features` property and include regressions for valid hidden-policy configuration and extractor-schema mismatch.
-
 
 ## 0.5.6
 

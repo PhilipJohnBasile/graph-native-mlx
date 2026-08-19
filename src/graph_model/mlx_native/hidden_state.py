@@ -10,6 +10,7 @@ from threading import RLock
 from typing import Any, Mapping, Protocol, Sequence
 
 from graph_model.models import RunState
+from graph_model.paired_eval import PairedEvaluationConfig, canonicalize_prompt_value
 from graph_model.provider import ProviderError
 
 HIDDEN_STATE_FORMAT_VERSION = 1
@@ -203,6 +204,9 @@ def policy_state_prompt(
 
     metrics = state.metrics.model_dump()
     budget = state.budget.model_dump()
+    paired = PairedEvaluationConfig.from_state(state)
+    if paired.enabled and paired.normalize_timing:
+        metrics["elapsed_seconds"] = 0.0
     remaining = {
         "steps": max(0, int(budget["max_steps"]) - state.step_count),
         "llm_calls": max(0, int(budget["max_llm_calls"]) - metrics["llm_calls"]),
@@ -213,9 +217,13 @@ def policy_state_prompt(
             - metrics["prompt_tokens"]
             - metrics["completion_tokens"],
         ),
-        "seconds": max(
-            0.0,
-            float(budget["max_seconds"]) - float(metrics["elapsed_seconds"]),
+        "seconds": (
+            float(budget["max_seconds"])
+            if paired.enabled and paired.normalize_timing
+            else max(
+                0.0,
+                float(budget["max_seconds"]) - float(metrics["elapsed_seconds"]),
+            )
         ),
     }
     selected_data_keys = (
@@ -258,6 +266,7 @@ def policy_state_prompt(
         "state": selected_data,
         "artifact_keys": sorted(str(key) for key in state.artifacts)[:48],
     }
+    payload = canonicalize_prompt_value(payload, state)
     user = json.dumps(
         payload,
         sort_keys=True,
@@ -290,6 +299,7 @@ def policy_state_prompt(
             "artifact_keys": sorted(str(key) for key in state.artifacts)[:24],
             "full_state_sha256": _sha256_text(user),
         }
+        payload = canonicalize_prompt_value(payload, state)
         user = json.dumps(
             payload,
             sort_keys=True,
@@ -313,6 +323,7 @@ def policy_state_prompt(
             },
             "state_sha256": _sha256_text(user),
         }
+        minimal = canonicalize_prompt_value(minimal, state)
         user = json.dumps(
             minimal,
             sort_keys=True,

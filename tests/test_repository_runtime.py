@@ -314,3 +314,243 @@ async def test_real_repository_graph_applies_patch_native_multifile_change(
     assert patch.count("diff --git") == 2
     assert "email_local.py" in patch
     assert "email_domain.py" in patch
+
+
+def _pagination_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "pagination-repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.invalid")
+    _git(root, "config", "user.name", "Test User")
+    (root / "paging").mkdir()
+    (root / "paging/__init__.py").write_text("", encoding="utf-8")
+    (root / "paging/cursor.py").write_text(
+        "def decode_cursor(value: str | None) -> int:\n"
+        "    if value is None:\n"
+        "        return 1\n"
+        "    return int(value)\n",
+        encoding="utf-8",
+    )
+    (root / "paging/query.py").write_text(
+        "from .cursor import decode_cursor\n\n"
+        "def query_offset(params: dict[str, str]) -> int:\n"
+        "    return decode_cursor(params.get('cursor'))\n",
+        encoding="utf-8",
+    )
+    (root / "paging/service.py").write_text(
+        "def page_start(cursor: str | None) -> int:\n"
+        "    return int(cursor or 1)\n",
+        encoding="utf-8",
+    )
+    (root / "test_paging.py").write_text(
+        "import pytest\n\n"
+        "from paging.cursor import decode_cursor\n"
+        "from paging.query import query_offset\n"
+        "from paging.service import page_start\n\n"
+        "def test_contract():\n"
+        "    assert decode_cursor(None) == 0\n"
+        "    assert decode_cursor('') == 0\n"
+        "    assert query_offset({}) == 0\n"
+        "    assert page_start(None) == 0\n"
+        "    assert decode_cursor('7') == 7\n"
+        "    with pytest.raises(ValueError):\n"
+        "        decode_cursor('-1')\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "initial")
+    return root
+
+
+PAGINATION_PATCH = """diff --git a/paging/cursor.py b/paging/cursor.py
+--- a/paging/cursor.py
++++ b/paging/cursor.py
+@@ -1,4 +1,7 @@
+ def decode_cursor(value: str | None) -> int:
+-    if value is None:
+-        return 1
+-    return int(value)
++    if value is None or value == "":
++        return 0
++    offset = int(value)
++    if offset < 0:
++        raise ValueError("cursor offset must be non-negative")
++    return offset
+diff --git a/paging/service.py b/paging/service.py
+--- a/paging/service.py
++++ b/paging/service.py
+@@ -1,2 +1,4 @@
++from .cursor import decode_cursor
++
+ def page_start(cursor: str | None) -> int:
+-    return int(cursor or 1)
++    return decode_cursor(cursor)
+"""
+
+
+class AppealedPaginationProvider(ModelProvider):
+    def __init__(self) -> None:
+        self.initial_reviews = 0
+        self.appeals = 0
+
+    @property
+    def identity(self) -> dict[str, str]:
+        return {"kind": "appealed-pagination", "version": "1"}
+
+    async def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+    ) -> tuple[dict[str, Any], int, int]:
+        del temperature
+        if "planning node" in system:
+            payload: dict[str, Any] = {
+                "steps": ["update cursor decoder", "share it from service", "verify"],
+                "risks": [],
+                "acceptance_tests": ["pytest passes"],
+            }
+        elif "repository patch proposal node" in system:
+            payload = {
+                "summary": "Use one cursor decoder",
+                "patch": PAGINATION_PATCH,
+                "assumptions": [],
+                "no_changes_needed": False,
+            }
+        elif "independent appeal verifier" in system:
+            self.appeals += 1
+            parsed = json.loads(user)
+            assert parsed["contract_oracle"]["verdict"] == "pass"
+            assert parsed["initial_review"]["verdict"] == "fail"
+            payload = {
+                "verdict": "pass",
+                "reasons": [
+                    "The oracle proves query_offset already used decode_cursor and page_start now does too."
+                ],
+                "confidence": 1.0,
+            }
+        elif "semantic verifier" in system:
+            self.initial_reviews += 1
+            payload = {
+                "verdict": "fail",
+                "reasons": [
+                    "query_offset was not changed to use decode_cursor"
+                ],
+                "confidence": 1.0,
+            }
+        else:
+            raise AssertionError(f"unexpected system prompt: {system}")
+        return payload, max(1, len(user) // 4), 32
+
+
+@pytest.mark.asyncio
+async def test_authoritative_contract_oracle_prevents_false_semantic_repair(
+    tmp_path: Path,
+) -> None:
+    source = _pagination_repo(tmp_path)
+    initial_data = workspace_initial_data(
+        source_root=source,
+        workspace_home=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        test_commands=[f"{sys.executable} -m pytest -q"],
+    )
+    initial_data["contract_oracle"] = {
+        "name": "pagination-shared-decoder",
+        "authoritative": True,
+        "checks": [
+            {
+                "kind": "allowed_changed_files",
+                "paths": ["paging/cursor.py", "paging/service.py"],
+                "required": ["paging/cursor.py", "paging/service.py"],
+            },
+            {
+                "kind": "python_function_calls",
+                "path": "paging/query.py",
+                "function": "query_offset",
+                "callee": "decode_cursor",
+            },
+            {
+                "kind": "python_function_calls",
+                "path": "paging/service.py",
+                "function": "page_start",
+                "callee": "decode_cursor",
+            },
+            {"kind": "tests_pass"},
+            {"kind": "tests_unchanged"},
+            {"kind": "files_end_newline"},
+        ],
+    }
+    provider = AppealedPaginationProvider()
+    runtime = GraphRuntime(
+        graph=load_default_graph(),
+        store=SQLiteRunStore(tmp_path / "runs.sqlite3"),
+        provider=provider,
+    )
+    state = await runtime.run(
+        "Implement a multi-file pagination cursor migration and preserve tests.",
+        run_id="pagination-appeal",
+        initial_data=initial_data,
+    )
+
+    assert state.status == "completed"
+    assert state.data["repair_count"] == 0
+    assert state.data["review"]["initial"]["verdict"] == "fail"
+    assert state.data["review"]["contract_oracle"]["verdict"] == "pass"
+    assert state.data["review"]["appeal"] is None
+    assert state.data["review"]["adjudicated"] is True
+    assert state.data["review"]["adjudication_mode"] == "authoritative-contract-oracle"
+    assert provider.initial_reviews == 1
+    assert provider.appeals == 0
+
+
+@pytest.mark.asyncio
+async def test_non_authoritative_contract_oracle_uses_independent_appeal(
+    tmp_path: Path,
+) -> None:
+    source = _pagination_repo(tmp_path)
+    initial_data = workspace_initial_data(
+        source_root=source,
+        workspace_home=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        test_commands=[f"{sys.executable} -m pytest -q"],
+    )
+    initial_data["contract_oracle"] = {
+        "name": "pagination-shared-decoder",
+        "checks": [
+            {
+                "kind": "python_function_calls",
+                "path": "paging/query.py",
+                "function": "query_offset",
+                "callee": "decode_cursor",
+            },
+            {
+                "kind": "python_function_calls",
+                "path": "paging/service.py",
+                "function": "page_start",
+                "callee": "decode_cursor",
+            },
+            {"kind": "tests_pass"},
+            {"kind": "tests_unchanged"},
+            {"kind": "files_end_newline"},
+        ],
+    }
+    provider = AppealedPaginationProvider()
+    runtime = GraphRuntime(
+        graph=load_default_graph(),
+        store=SQLiteRunStore(tmp_path / "runs.sqlite3"),
+        provider=provider,
+    )
+    state = await runtime.run(
+        "Implement a multi-file pagination cursor migration and preserve tests.",
+        run_id="pagination-independent-appeal",
+        initial_data=initial_data,
+    )
+
+    assert state.status == "completed"
+    assert state.data["repair_count"] == 0
+    assert state.data["review"]["contract_oracle"]["verdict"] == "pass"
+    assert state.data["review"]["appeal"]["verdict"] == "pass"
+    assert state.data["review"]["adjudication_mode"] == "independent-appeal"
+    assert provider.initial_reviews == 1
+    assert provider.appeals == 1
