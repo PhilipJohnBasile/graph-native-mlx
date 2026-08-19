@@ -1,11 +1,11 @@
 # Changelog
 
-## 0.5.3
+## 0.5.4
 
 - Enforced reward-weighted action imitation during MLX policy training: completed runs may teach route/edge/stop actions, while failed runs train only success-value and cost prediction.
 - Added a regression proving failed decisions receive zero action-imitation weight.
 - Added a controlled 16-repository Apple-Silicon bootstrap corpus and one-command trace/export collector with route, no-change, success, and bounded-failure diversity.
-- Updated the Apple-Silicon in-place upgrade helper to v0.5.3 while preserving environments, pinned model identity, traces, hidden features, worktrees, and patches.
+- Updated the Apple-Silicon in-place upgrade helper to v0.5.4 while preserving environments, pinned model identity, traces, hidden features, worktrees, and patches.
 
 ## 0.5.2
 

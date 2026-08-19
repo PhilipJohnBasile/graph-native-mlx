@@ -326,3 +326,29 @@ def test_mlx_provider_close_releases_state_and_prevents_reuse() -> None:
     assert not provider._hidden_cache
     with pytest.raises(RuntimeError, match="closed"):
         provider.load()
+
+
+@pytest.mark.asyncio
+async def test_mlx_provider_retries_invalid_json_once_with_strict_recovery() -> None:
+    class RecoveryBackend(FakeMLXLMBackend):
+        def stream_generate(self, model, tokenizer, prompt, *, max_tokens, sampler):
+            del model, tokenizer
+            self.thread_ids.append(get_ident())
+            self.stream_calls += 1
+            self.last_prompt = prompt
+            assert max_tokens == 64
+            self.last_sampler = sampler
+            if self.stream_calls == 1:
+                return [FakeResponse('{"ok": ', 9, 2)]
+            return [FakeResponse('{"ok": true}', 13, 4)]
+
+    backend = RecoveryBackend()
+    provider = MLXLocalProvider(model_path="local/model", max_tokens=64, backend=backend)
+    payload, prompt_tokens, completion_tokens = await provider.complete_json(
+        system="system", user="user", temperature=0.2
+    )
+    assert payload == {"ok": True}
+    assert backend.stream_calls == 2
+    assert prompt_tokens == 22
+    assert completion_tokens == 6
+    assert backend.last_sampler[0] == 0.0

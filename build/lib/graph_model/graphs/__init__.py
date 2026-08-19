@@ -1,0 +1,1 @@
+"""Bundled validated graph specifications."""

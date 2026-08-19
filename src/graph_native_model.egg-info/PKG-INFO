@@ -1,3 +1,26 @@
+Metadata-Version: 2.4
+Name: graph-native-model
+Version: 0.5.4
+Summary: A graph-native MLX coding runtime with Qwen hidden-state policy fusion, durable Git workspaces, M5 qualification, and held-out graph optimization.
+Author: Philip John Basile
+License: Apache-2.0
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: httpx<1,>=0.27
+Requires-Dist: pydantic<3,>=2.10
+Requires-Dist: PyYAML<7,>=6
+Provides-Extra: dev
+Requires-Dist: pytest<10,>=8; extra == "dev"
+Requires-Dist: pytest-asyncio<2,>=0.25; extra == "dev"
+Provides-Extra: mlx
+Requires-Dist: mlx<1,>=0.31; (platform_system == "Darwin" and platform_machine == "arm64") and extra == "mlx"
+Requires-Dist: mlx-lm<1,>=0.31.3; (platform_system == "Darwin" and platform_machine == "arm64") and extra == "mlx"
+Provides-Extra: restate
+Requires-Dist: restate_sdk[serde]<2,>=1.0.4; extra == "restate"
+Requires-Dist: hypercorn<1,>=0.17; extra == "restate"
+Dynamic: license-file
+
 # Graph-Native MLX Model
 
 A graph-controlled coding-agent runtime for Apple Silicon. It combines a resident MLX-LM language backbone with a validated workflow graph, hard transition masks, state-aware Qwen representations, durable checkpoints, isolated Git worktrees, transactional patch application, real verifier execution, and held-out graph optimization.

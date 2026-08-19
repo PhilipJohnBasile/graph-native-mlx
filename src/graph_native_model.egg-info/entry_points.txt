@@ -1,0 +1,2 @@
+[console_scripts]
+graph-model = graph_model.cli:main

@@ -31,7 +31,7 @@ mkdir -p "$TRAINING_ROOT"
   --python "$PYTHON"
 
 # The fixtures are compact; bound generation without altering .graph-env.
-export GRAPH_MODEL_MLX_MAX_TOKENS="${GRAPH_MODEL_BOOTSTRAP_MAX_TOKENS:-3072}"
+export GRAPH_MODEL_MLX_MAX_TOKENS="${GRAPH_MODEL_BOOTSTRAP_MAX_TOKENS:-4096}"
 
 "$GRAPH_MODEL" collect-traces \
   --provider mlx \
@@ -42,13 +42,14 @@ export GRAPH_MODEL_MLX_MAX_TOKENS="${GRAPH_MODEL_BOOTSTRAP_MAX_TOKENS:-3072}"
   --artifact-root "$TRAINING_ROOT/artifacts" \
   --output "$SUMMARY" \
   --resume-existing \
+  --stop-on-error \
   --max-context-files 8 \
   --max-context-file-bytes 20000 \
   --max-context-bytes 80000 \
   --max-patch-files 8 \
   --max-patch-bytes 100000
 
-# Include both successful and failed traces. v0.5.3 gives failed actions zero
+# Include both successful and failed traces. v0.5.4 gives failed actions zero
 # imitation weight while retaining their value/cost targets.
 "$GRAPH_MODEL" export-mlx-policy \
   --db "$DB" \

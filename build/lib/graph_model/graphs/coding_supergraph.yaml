@@ -1,0 +1,188 @@
+name: coding-supergraph
+version: 0.3.0
+description: >-
+  A validated coding-agent supergraph. The router activates a fast direct path or a deeper
+  plan-and-check path. Language nodes only propose patches; a dedicated idempotent apply gate owns
+  repository mutation. Failures enter a bounded diagnose-repair cycle rather than an open-ended loop.
+start: intake
+terminals: [finish, abort]
+metadata:
+  policy: select-first-local-repair
+  graph_plasticity: bounded
+  optimizer: offline-mcts-compatible
+  repository_mutation: dedicated-transactional-apply-gate
+  workspace_execution: detached-git-worktree
+  verifier_integrity: fingerprint-before-and-after
+
+nodes:
+  intake:
+    kind: router
+    operator: route_task
+    description: Select a validated route from task features and constraints.
+
+  context:
+    kind: tool
+    operator: collect_context
+    description: Build explicit, inspectable task and repository state.
+    cacheable: false
+    side_effect: true
+
+  plan:
+    kind: llm
+    operator: make_plan
+    description: Produce a typed plan for deep and repair routes.
+
+  plan_check:
+    kind: verifier
+    operator: check_plan
+    description: Reject empty or invalid plans before execution.
+
+  implement:
+    kind: llm
+    operator: implement
+    description: Propose a candidate or unified diff; cannot mutate the repository or declare success.
+
+  apply:
+    kind: tool
+    operator: apply_candidate
+    description: Validate and idempotently apply only the pending graph-authorized patch.
+    cacheable: false
+    side_effect: true
+
+  tests:
+    kind: verifier
+    operator: run_tests
+    description: Run bounded deterministic commands before semantic review.
+    cacheable: false
+    side_effect: true
+
+  review:
+    kind: llm
+    operator: review
+    description: Independently review the verified diff against the objective.
+
+  diagnose:
+    kind: llm
+    operator: diagnose
+    description: Convert exact apply, test, and review evidence into targeted repair guidance.
+
+  repair:
+    kind: llm
+    operator: repair
+    description: Propose one bounded local repair against the current working tree.
+
+  finish:
+    kind: final
+    operator: finalize
+    description: Return the verified result, patch artifact, and exact evidence.
+
+  abort:
+    kind: final
+    operator: abort
+    description: Stop explicitly when bounded repair paths are exhausted.
+
+edges:
+  - from: intake
+    to: context
+    priority: 100
+
+  - from: context
+    to: implement
+    when: data.route == 'fast'
+    priority: 100
+    label: fast-path
+
+  - from: context
+    to: plan
+    when: data.route in {'deep', 'repair'}
+    priority: 90
+    label: planned-path
+
+  - from: plan
+    to: plan_check
+    priority: 100
+    max_traversals: 2
+
+  - from: plan_check
+    to: implement
+    when: data.verdict == 'pass'
+    priority: 100
+
+  - from: plan_check
+    to: plan
+    when: data.verdict == 'fail' and data.plan_revision_count < 2
+    priority: 90
+    max_traversals: 1
+    label: revise-plan
+
+  - from: plan_check
+    to: abort
+    when: data.verdict == 'fail' and data.plan_revision_count >= 2
+    priority: 80
+
+  - from: implement
+    to: apply
+    priority: 100
+
+  - from: apply
+    to: tests
+    when: data.verdict == 'pass'
+    priority: 100
+    max_traversals: 3
+
+  - from: apply
+    to: diagnose
+    when: data.verdict == 'fail' and data.repair_count < 2
+    priority: 90
+    max_traversals: 2
+    label: apply-repair
+
+  - from: apply
+    to: abort
+    when: data.verdict == 'fail' and data.repair_count >= 2
+    priority: 80
+
+  - from: tests
+    to: review
+    when: data.verdict == 'pass'
+    priority: 100
+    max_traversals: 3
+
+  - from: tests
+    to: diagnose
+    when: data.verdict == 'fail' and data.repair_count < 2
+    priority: 90
+    max_traversals: 2
+    label: test-repair
+
+  - from: tests
+    to: abort
+    when: data.verdict == 'fail' and data.repair_count >= 2
+    priority: 80
+
+  - from: review
+    to: finish
+    when: data.verdict == 'pass'
+    priority: 100
+
+  - from: review
+    to: diagnose
+    when: data.verdict == 'fail' and data.repair_count < 2
+    priority: 90
+    max_traversals: 2
+    label: review-repair
+
+  - from: review
+    to: abort
+    when: data.verdict == 'fail' and data.repair_count >= 2
+    priority: 80
+
+  - from: diagnose
+    to: repair
+    priority: 100
+    max_traversals: 2
+
+  - from: repair
+    to: apply
+    priority: 100
+    max_traversals: 2

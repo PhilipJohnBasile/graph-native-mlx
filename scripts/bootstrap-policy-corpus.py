@@ -243,7 +243,12 @@ def main() -> int:
     repos_root.mkdir(parents=True, exist_ok=True)
     manifest.parent.mkdir(parents=True, exist_ok=True)
     records, metadata = [], []
-    test_command = f"{Path(args.python).expanduser().resolve()} -m pytest -q"
+    python_invocation = Path(args.python).expanduser()
+    if not python_invocation.is_absolute():
+        python_invocation = Path.cwd() / python_invocation
+    # Preserve the lexical virtual-environment interpreter path. Resolving a
+    # venv Python symlink on macOS bypasses pyvenv.cfg and loses site-packages.
+    test_command = f"{python_invocation.absolute()} -m pytest -q"
     for index, fixture in enumerate(_fixtures(), 1):
         repo = repos_root / fixture.name
         _write_repo(repo, fixture, reset=args.reset)

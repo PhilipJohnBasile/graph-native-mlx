@@ -5,7 +5,7 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${GRAPH_NATIVE_MLX_HOME:-$HOME/graph-native-mlx}"
 BACKUP_ROOT="${GRAPH_NATIVE_MLX_BACKUP_ROOT:-$HOME/graph-native-mlx-backups}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="$BACKUP_ROOT/pre-v0.5.3-$STAMP"
+BACKUP="$BACKUP_ROOT/pre-v0.5.4-$STAMP"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "ERROR: this upgrade helper requires Apple Silicon macOS." >&2

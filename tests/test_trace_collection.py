@@ -182,3 +182,36 @@ async def test_trace_collection_runs_real_repository_and_writes_summary(tmp_path
         artifact_root=tmp_path / "artifacts",
     )
     assert resumed["results"][0]["existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_trace_collection_terminalizes_provider_exception(tmp_path: Path) -> None:
+    class BrokenProvider(_TraceProvider):
+        async def complete_json(self, *, system, user, temperature=None):
+            del system, user, temperature
+            raise RuntimeError("malformed model output")
+
+    source = _repo(tmp_path)
+    task = RepositoryTraceTask(
+        run_id="trace-provider-error",
+        task="quick fix: correct the failing add function",
+        repo=str(source),
+        test_commands=(f"{sys.executable} -m pytest -q",),
+    )
+    graph = load_default_graph()
+    store = SQLiteRunStore(tmp_path / "runs.sqlite3")
+    controller = MLXGraphController(graph=graph, decision_backend=PythonDecisionBackend())
+    summary = await collect_repository_traces(
+        tasks=[task],
+        graph=graph,
+        store=store,
+        provider=BrokenProvider(),
+        controller=controller,
+        workspace_home=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+    )
+    assert summary["status_counts"] == {"collector_error": 1}
+    persisted = store.load_run(task.run_id)
+    assert persisted is not None
+    assert persisted.status == "failed"
+    assert persisted.error and "collector error" in persisted.error

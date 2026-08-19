@@ -65,3 +65,8 @@ def test_parse_json_object_prefers_the_last_complete_outer_object() -> None:
         'analysis example {"wrong": true} final {"ok": {"nested": true}} trailing'
     )
     assert parsed == {"ok": {"nested": True}}
+
+
+def test_parse_json_object_accepts_safe_python_literal_mapping() -> None:
+    parsed = _parse_json_object("analysis {'ok': True, 'items': [1, 2,],} trailing")
+    assert parsed == {"ok": True, "items": [1, 2]}
