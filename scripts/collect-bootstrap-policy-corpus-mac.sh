@@ -50,7 +50,7 @@ export GRAPH_MODEL_MLX_MAX_TOKENS="${GRAPH_MODEL_BOOTSTRAP_MAX_TOKENS:-4096}"
   --max-patch-files 8 \
   --max-patch-bytes 100000
 
-# Include both successful and failed traces. v0.5.5 gives failed actions zero
+# Include both successful and failed traces. v0.5.6 gives failed actions zero
 # imitation weight while retaining their value/cost targets.
 "$GRAPH_MODEL" export-mlx-policy \
   --db "$DB" \

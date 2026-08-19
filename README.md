@@ -8,7 +8,7 @@ The central rule is:
 
 This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, effects, verification order, budgets, retries, termination, recovery, and promotion.
 
-## v0.5.5 capabilities
+## v0.5.6 capabilities
 
 ### MLX-native model and policy path
 
@@ -22,6 +22,7 @@ This is a compound model rather than a foundation-model pretraining run. The lan
 - Optional route, edge, stop, success-value, and cost policy heads
 - Model, graph, extractor, configuration, and policy-weight identity checks
 - Hash-addressed projected-feature artifacts; raw prompts and raw hidden tensors are not persisted
+- Qwen thinking disabled by default for bounded structured artifacts, with an opt-in environment switch and legacy-tokenizer fallback
 
 ### Hard graph and durable repository execution
 
@@ -30,7 +31,7 @@ This is a compound model rather than a foundation-model pretraining run. The lan
 - Predicate evaluation and traversal caps outside the language model
 - Two bounded local repair passes; no unbounded retry loop
 - Detached per-run Git worktrees by default
-- `GRAPH_PATCH_V1` raw patch envelopes keep multiline diffs outside JSON, with one bounded deterministic recovery and strict JSON compatibility
+- `GRAPH_PATCH_V1` raw patch envelopes keep multiline diffs outside JSON, with one bounded deterministic recovery, one truncation-only continuation, and strict JSON compatibility
 - Strict unified-diff validation and sensitive-path blocking
 - Transactional patch application and rollback
 - Idempotent effect ledgers with interruption recovery
@@ -123,8 +124,8 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.5.5.zip
-cd graph-native-model-mlx-v0.5.5
+unzip graph-native-model-mlx-v0.5.6.zip
+cd graph-native-model-mlx-v0.5.6
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -140,10 +141,10 @@ The base package and portable tests work on non-MLX systems. The `mlx` extra is 
 
 The release includes a state-preserving upgrade helper. It keeps the existing virtual environment, `.graph-env`, `.graph-model` database, hidden-state artifacts, detached worktrees, and verified patches, while backing up the prior source tree.
 
-After extracting the v0.5.5 source archive:
+After extracting the v0.5.6 source archive:
 
 ```bash
-cd graph-native-model-mlx-v0.5.5
+cd graph-native-model-mlx-v0.5.6
 ./scripts/upgrade-mac-in-place.sh
 ```
 
@@ -188,7 +189,7 @@ graph-model mlx-doctor
 graph-model mlx-doctor --load-model
 ```
 
-v0.5.5 includes one evidence-producing qualification command:
+v0.5.6 includes one evidence-producing qualification command:
 
 ```bash
 graph-model qualify-mac \
@@ -244,7 +245,7 @@ When an absolute Python command is the active virtual-environment interpreter, t
 
 ### Execution boundary
 
-Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.5 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
+Verifier commands execute repository code with the current user’s operating-system permissions. Path, command shape, duration, output, and tracked mutations are constrained, but v0.5.6 is not a hostile-code sandbox. Use only repositories and test commands you trust, or run the project inside a restricted VM/container.
 
 ## Inspect, promote, clean up, and resume
 
@@ -290,13 +291,21 @@ Resume requires the same graph version, provider identity, controller identity, 
 
 ## Bootstrap the policy-data pipeline
 
-The v0.5.5 source archive includes a controlled 16-repository bootstrap corpus spanning fast, deep, repair, no-change, successful, and bounded-failure executions. It uses a dedicated trace database and never activates weights automatically:
+The v0.5.6 source archive includes a controlled 16-repository bootstrap corpus spanning fast, deep, repair, no-change, successful, and bounded-failure executions. It uses a dedicated trace database and never activates weights automatically:
 
 ```bash
 scripts/collect-bootstrap-policy-corpus-mac.sh
 ```
 
 Use this only to qualify the collection/export pipeline. Real policy training should add substantially more varied real-repository traces and held-out tasks.
+
+Structured MLX generations use `enable_thinking=false` by default when the
+tokenizer supports that chat-template option. This keeps a bounded output budget
+focused on JSON or patch bytes rather than private reasoning. Set
+`GRAPH_MODEL_MLX_STRUCTURED_THINKING=true` only for an explicit experiment. A
+truncated patch may receive one final continuation call, but only after the
+deterministic recovery reaches the exact token ceiling and emits a recognizable
+`GRAPH_PATCH_V1` prefix.
 
 ## Collect state-aware policy traces
 

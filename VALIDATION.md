@@ -1,4 +1,4 @@
-# Validation Record — v0.5.5
+# Validation Record — v0.5.6
 
 ## Portable validation environment
 
@@ -9,7 +9,7 @@
 
 ## Completed checks
 
-- 113 portable tests passed across release-validation groups
+- 118 portable tests passed across release-validation groups
 - all source and test modules compiled with `compileall`
 - YAML graph validated as 12 nodes, 19 edges, and 2 terminals
 - generated default graph module reproduced from the YAML source
@@ -31,6 +31,9 @@
 - model/tokenizer residency, explicit close, post-close rejection, loader-signature compatibility, chat-template fallback, and complete-JSON extraction passed
 - `GRAPH_PATCH_V1` parsing passed for raw multi-file unified diffs, compact JSON metadata, strict-JSON provider compatibility, marker-order enforcement, and conflicting no-change rejection
 - direct MLX patch generation passed through an injected backend without JSON-escaping the diff, including exactly one deterministic envelope-recovery attempt at temperature 0.0
+- structured MLX calls pass `enable_thinking=false` to compatible chat templates by default and fall back safely for legacy tokenizers that reject the optional keyword
+- a recovery response that reaches the exact generation ceiling may receive exactly one patch-envelope continuation; partial metadata is discarded and partial diffs retain only complete lines
+- continuation remains hard-bounded to a third and final generation call and is unavailable when no recognizable `GRAPH_PATCH_V1` prefix exists
 - malformed patch failures expose bounded hashes, lengths, marker presence, and truncation signals without persisting or echoing raw model output
 - a real two-file repository change passed patch-native proposal, transactional apply, pytest verification, semantic review, verified patch export, and source-checkout isolation
 - single-worker affinity for model load, generation, hidden extraction, and policy inference passed
@@ -48,7 +51,7 @@
 - controlled bootstrap corpus generation produced 16 clean Git repositories spanning fast, deep, repair, no-change, completed, and bounded-failure cases without embedding expected labels in the worktree
 - bootstrap collector shell syntax and dedicated trace/export paths passed portable validation
 
-## v0.5.5 qualification checks
+## v0.5.6 qualification checks
 
 - the Mac qualification workflow was executed through injected provider, diagnostics, hidden-state, and controller backends
 - platform/configuration, model-load, structured-generation, hidden-capture, hard-masked route/stop/edge control, and provider-close stages passed

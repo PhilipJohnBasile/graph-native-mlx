@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6
+
+- Disabled Qwen thinking by default for bounded structured JSON and patch generation through the tokenizer chat-template control, with a compatibility fallback for tokenizers that do not expose `enable_thinking`.
+- Added one truncation-only patch-envelope continuation after the existing deterministic recovery. It is permitted only when the recovery reaches the exact generation ceiling and has emitted a recognizable `GRAPH_PATCH_V1` prefix.
+- Added safe salvage rules that discard partial metadata, retain only complete raw-diff lines, and never persist or echo the model's unparsed response.
+- Added portable regressions for thinking-disabled templates, legacy tokenizer compatibility, truncated metadata continuation, partial-diff continuation, the three-call hard bound, and resume/model-fingerprint compatibility across the formatting toggle.
+- Updated Apple-Silicon upgrade and bootstrap scripts to v0.5.6 while preserving the nine completed clean corpus runs and reopening only task 10.
+
 ## 0.5.5
 
 - Added `GRAPH_PATCH_V1`, a bounded raw-text patch envelope that keeps multiline unified diffs outside JSON while retaining compact JSON metadata and strict JSON compatibility.

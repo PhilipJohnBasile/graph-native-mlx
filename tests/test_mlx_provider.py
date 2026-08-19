@@ -18,10 +18,19 @@ class FakeTokenizer:
         self.messages = None
         self.template_calls = []
 
-    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tokenize,
+        add_generation_prompt,
+        enable_thinking=None,
+    ):
         assert tokenize is False
         self.messages = messages
-        self.template_calls.append((messages, add_generation_prompt, get_ident()))
+        self.template_calls.append(
+            (messages, add_generation_prompt, get_ident(), enable_thinking)
+        )
         if not self.template_works:
             raise ValueError("missing template")
         if add_generation_prompt:
@@ -101,6 +110,7 @@ async def test_mlx_provider_loads_once_and_streams_json_in_process() -> None:
     assert backend.stream_calls == 2
     assert backend.last_prompt == "CHAT-TEMPLATE-PROMPT"
     assert backend.tokenizer.messages[0]["role"] == "system"
+    assert backend.tokenizer.template_calls[-1][3] is False
     assert backend.last_sampler == (0.2, 0.9, 0.05, 20)
     assert provider.loaded is True
     provider.close()
@@ -114,6 +124,30 @@ async def test_mlx_provider_has_a_role_delimited_template_fallback() -> None:
     assert payload == {"ok": True}
     assert "SYSTEM INSTRUCTIONS:\nSYSTEM" in backend.last_prompt
     assert "USER INPUT:\nUSER" in backend.last_prompt
+    provider.close()
+
+
+@pytest.mark.asyncio
+async def test_mlx_provider_retries_chat_template_without_thinking_kwarg() -> None:
+    class LegacyTokenizer:
+        def __init__(self) -> None:
+            self.messages = None
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            self.messages = messages
+            return "LEGACY-TEMPLATE" if add_generation_prompt else "LEGACY-HIDDEN"
+
+        def encode(self, text, add_special_tokens=True):
+            del add_special_tokens
+            return list(range(max(1, len(text) // 3)))
+
+    backend = FakeMLXLMBackend()
+    backend.tokenizer = LegacyTokenizer()
+    provider = MLXLocalProvider(model_path="local/model", max_tokens=64, backend=backend)
+    payload, _, _ = await provider.complete_json(system="SYSTEM", user="USER")
+    assert payload == {"ok": True}
+    assert backend.last_prompt == "LEGACY-TEMPLATE"
     provider.close()
 
 
@@ -332,6 +366,24 @@ def test_mlx_provider_close_releases_state_and_prevents_reuse() -> None:
         provider.load()
 
 
+def test_structured_thinking_toggle_does_not_change_resume_model_identity() -> None:
+    disabled = MLXLocalProvider(
+        model_path="local/model",
+        max_tokens=64,
+        structured_thinking_enabled=False,
+        backend=FakeMLXLMBackend(),
+    )
+    enabled = MLXLocalProvider(
+        model_path="local/model",
+        max_tokens=64,
+        structured_thinking_enabled=True,
+        backend=FakeMLXLMBackend(),
+    )
+    assert disabled.identity == enabled.identity
+    disabled.close()
+    enabled.close()
+
+
 @pytest.mark.asyncio
 async def test_mlx_provider_retries_invalid_json_once_with_strict_recovery() -> None:
     class RecoveryBackend(FakeMLXLMBackend):
@@ -461,6 +513,100 @@ GRAPH_PATCH_DIFF_END
     assert completion_tokens == 28
     assert "PATCH ENVELOPE RECOVERY" in backend.tokenizer.messages[0]["content"]
     provider.close()
+
+
+@pytest.mark.asyncio
+async def test_mlx_provider_continues_one_truncated_patch_envelope() -> None:
+    class TruncatedPatchBackend(FakeMLXLMBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.temperatures: list[float] = []
+
+        def stream_generate(self, model, tokenizer, prompt, *, max_tokens, sampler):
+            del model, tokenizer
+            self.thread_ids.append(get_ident())
+            self.stream_calls += 1
+            self.last_prompt = prompt
+            self.last_sampler = sampler
+            self.temperatures.append(float(sampler[0]))
+            assert max_tokens == 64
+            if self.stream_calls == 1:
+                return [FakeResponse("Malformed initial proposal", 9, 8)]
+            if self.stream_calls == 2:
+                return [
+                    FakeResponse(
+                        "<think>bounded private work</think>\nGRAPH_PATCH_V1",
+                        13,
+                        64,
+                    )
+                ]
+            return [
+                FakeResponse(
+                    """GRAPH_PATCH_META_BEGIN
+{"summary":"Continued","assumptions":[],"no_changes_needed":false}
+GRAPH_PATCH_META_END
+GRAPH_PATCH_DIFF_BEGIN
+diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1 +1 @@
+-old
++new
+GRAPH_PATCH_DIFF_END
+""",
+                    17,
+                    24,
+                )
+            ]
+
+    backend = TruncatedPatchBackend()
+    provider = MLXLocalProvider(model_path="local/model", max_tokens=64, backend=backend)
+    payload, prompt_tokens, completion_tokens = await provider.complete_patch(
+        system="patch system",
+        user="patch user",
+        temperature=0.3,
+    )
+    assert payload["summary"] == "Continued"
+    assert "+new" in payload["patch"]
+    assert backend.stream_calls == 3
+    assert backend.temperatures == [0.3, 0.0, 0.0]
+    assert prompt_tokens == 39
+    assert completion_tokens == 96
+    assert "PATCH ENVELOPE TRUNCATION CONTINUATION" in backend.tokenizer.messages[0][
+        "content"
+    ]
+    assert backend.tokenizer.template_calls[-1][3] is False
+    provider.close()
+
+
+def test_patch_continuation_plan_discards_partial_metadata() -> None:
+    content = """analysis
+GRAPH_PATCH_V1
+GRAPH_PATCH_META_BEGIN
+{"summary":"cut off"
+"""
+    prefix, instruction = MLXLocalProvider._patch_continuation_plan(content) or ("", "")
+    assert prefix.endswith("GRAPH_PATCH_V1\n")
+    assert "cut off" not in prefix
+    assert instruction.startswith("Start with GRAPH_PATCH_META_BEGIN")
+
+
+def test_patch_continuation_plan_keeps_complete_partial_diff_lines() -> None:
+    content = """GRAPH_PATCH_V1
+GRAPH_PATCH_META_BEGIN
+{"summary":"Partial","assumptions":[],"no_changes_needed":false}
+GRAPH_PATCH_META_END
+GRAPH_PATCH_DIFF_BEGIN
+diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1 +1 @@
+-old
++ne"""
+    prefix, instruction = MLXLocalProvider._patch_continuation_plan(content) or ("", "")
+    assert prefix.endswith("-old\n")
+    assert "+ne" not in prefix
+    assert "Continue the raw unified diff" in instruction
 
 
 @pytest.mark.asyncio

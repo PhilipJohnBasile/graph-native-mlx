@@ -15,6 +15,11 @@ from graph_model.models import RunState
 from graph_model.provider import (
     ModelProvider,
     ProviderError,
+    _PATCH_DIFF_BEGIN,
+    _PATCH_DIFF_END,
+    _PATCH_HEADER,
+    _PATCH_META_BEGIN,
+    _PATCH_META_END,
     _parse_json_object,
     _parse_patch_proposal,
 )
@@ -262,6 +267,7 @@ class MLXLocalProvider(ModelProvider):
         top_p: float = 1.0,
         min_p: float = 0.0,
         top_k: int = 0,
+        structured_thinking_enabled: bool = False,
         lazy_load_weights: bool = False,
         trust_remote_code: bool = False,
         backend: MLXLMBackend | None = None,
@@ -297,6 +303,7 @@ class MLXLocalProvider(ModelProvider):
         self.top_p = float(top_p)
         self.min_p = float(min_p)
         self.top_k = int(top_k)
+        self.structured_thinking_enabled = bool(structured_thinking_enabled)
         self.lazy_load_weights = bool(lazy_load_weights)
         self.trust_remote_code = bool(trust_remote_code)
         self.backend = backend or NativeMLXLMBackend()
@@ -342,6 +349,9 @@ class MLXLocalProvider(ModelProvider):
             top_p=float(os.getenv("GRAPH_MODEL_MLX_TOP_P", "1.0")),
             min_p=float(os.getenv("GRAPH_MODEL_MLX_MIN_P", "0.0")),
             top_k=int(os.getenv("GRAPH_MODEL_MLX_TOP_K", "0")),
+            structured_thinking_enabled=_env_bool(
+                "GRAPH_MODEL_MLX_STRUCTURED_THINKING", False
+            ),
             lazy_load_weights=_env_bool("GRAPH_MODEL_MLX_LAZY_LOAD", False),
             trust_remote_code=_env_bool("GRAPH_MODEL_MLX_TRUST_REMOTE_CODE", False),
             hidden_capture_enabled=_env_bool("GRAPH_MODEL_MLX_CAPTURE_HIDDEN", False),
@@ -575,8 +585,14 @@ class MLXLocalProvider(ModelProvider):
         system: str,
         user: str,
         temperature: float,
+        enable_thinking: bool | None = None,
     ) -> tuple[str, int, int]:
-        prompt = self._render_prompt(tokenizer, system=system, user=user)
+        prompt = self._render_prompt(
+            tokenizer,
+            system=system,
+            user=user,
+            enable_thinking=enable_thinking,
+        )
         sampler = self.backend.make_sampler(
             temperature=temperature,
             top_p=self.top_p,
@@ -644,6 +660,77 @@ class MLXLocalProvider(ModelProvider):
             parts.append(f"markers={marker_state}")
         return ", ".join(parts)
 
+    @staticmethod
+    def _patch_continuation_plan(content: str) -> tuple[str, str] | None:
+        """Return a safe salvage prefix and one bounded continuation instruction.
+
+        A continuation is permitted only after the model has emitted the patch
+        envelope header and exhausted the configured generation budget. Partial
+        metadata is discarded because it cannot be validated safely. A partial
+        raw diff is retained through its last complete line so the model can
+        finish the remaining hunks and closing marker without regenerating the
+        already-produced prefix.
+        """
+
+        header = content.rfind(_PATCH_HEADER)
+        if header < 0:
+            return None
+
+        header_end = header + len(_PATCH_HEADER)
+        meta_begin = content.find(_PATCH_META_BEGIN, header_end)
+        meta_end = (
+            content.find(_PATCH_META_END, meta_begin + len(_PATCH_META_BEGIN))
+            if meta_begin >= 0
+            else -1
+        )
+        diff_begin = (
+            content.find(_PATCH_DIFF_BEGIN, meta_end + len(_PATCH_META_END))
+            if meta_end >= 0
+            else -1
+        )
+        diff_end = (
+            content.find(_PATCH_DIFF_END, diff_begin + len(_PATCH_DIFF_BEGIN))
+            if diff_begin >= 0
+            else -1
+        )
+
+        if diff_end >= 0:
+            return None
+
+        if meta_begin < 0 or meta_end < 0:
+            prefix = content[:header_end].rstrip() + "\n"
+            instruction = (
+                "Start with GRAPH_PATCH_META_BEGIN. Emit one compact valid JSON "
+                "metadata object, GRAPH_PATCH_META_END, GRAPH_PATCH_DIFF_BEGIN, "
+                "the complete raw unified diff, and GRAPH_PATCH_DIFF_END."
+            )
+            return prefix, instruction
+
+        if diff_begin < 0:
+            prefix = content[: meta_end + len(_PATCH_META_END)].rstrip() + "\n"
+            instruction = (
+                "Start with GRAPH_PATCH_DIFF_BEGIN. Emit the complete raw unified "
+                "diff and finish with GRAPH_PATCH_DIFF_END."
+            )
+            return prefix, instruction
+
+        # Preserve only complete lines from a partial diff. The continuation
+        # prompt includes a bounded suffix so the model can continue the exact
+        # current hunk without needing the entire earlier response.
+        last_newline = content.rfind("\n")
+        minimum = diff_begin + len(_PATCH_DIFF_BEGIN)
+        if last_newline < minimum:
+            prefix = content[:minimum].rstrip() + "\n"
+        else:
+            prefix = content[: last_newline + 1]
+        instruction = (
+            "Continue the raw unified diff immediately after the supplied prefix. "
+            "Do not repeat GRAPH_PATCH_V1 or any BEGIN marker. Complete any open "
+            "hunk, emit all remaining file diffs, and finish with "
+            "GRAPH_PATCH_DIFF_END."
+        )
+        return prefix, instruction
+
     async def complete_json(
         self,
         *,
@@ -700,6 +787,7 @@ class MLXLocalProvider(ModelProvider):
                     system=attempt_system,
                     user=attempt_user,
                     temperature=attempt_temperature,
+                    enable_thinking=self.structured_thinking_enabled,
                 )
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
@@ -770,7 +858,8 @@ class MLXLocalProvider(ModelProvider):
                         "GRAPH_PATCH_DIFF_BEGIN\n"
                         "<raw unified diff; do not JSON-escape it>\n"
                         "GRAPH_PATCH_DIFF_END\n"
-                        "Use an empty diff block only when no_changes_needed is true."
+                        "Use an empty diff block only when no_changes_needed is true. "
+                        "Put GRAPH_PATCH_META_BEGIN immediately after GRAPH_PATCH_V1."
                     )
                     attempt_user = (
                         user
@@ -785,6 +874,7 @@ class MLXLocalProvider(ModelProvider):
                     system=attempt_system,
                     user=attempt_user,
                     temperature=attempt_temperature,
+                    enable_thinking=self.structured_thinking_enabled,
                 )
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
@@ -796,8 +886,52 @@ class MLXLocalProvider(ModelProvider):
                     last_error = exc
                     if attempt == 0:
                         continue
+                    break
+                return parsed, total_prompt_tokens, total_completion_tokens
+
+            # A third model call is allowed only when the deterministic recovery
+            # actually exhausted the configured generation budget and emitted a
+            # recognizable GRAPH_PATCH_V1 prefix. This is a continuation of the
+            # same bounded artifact, not an open-ended retry loop.
+            continuation_plan = None
+            if last_completion_tokens >= self.max_tokens:
+                continuation_plan = self._patch_continuation_plan(last_content)
+
+            if continuation_plan is not None:
+                prefix, instruction = continuation_plan
+                prefix_tail = prefix[-12_000:]
+                continuation_system = (
+                    system
+                    + "\n\nPATCH ENVELOPE TRUNCATION CONTINUATION: The deterministic "
+                    "patch response reached the generation limit. Return only the missing "
+                    "suffix requested below. Do not add analysis, a Markdown fence, or a "
+                    "new task explanation. This is the final bounded continuation call."
+                )
+                continuation_user = (
+                    user
+                    + "\n\nThe following validated prefix was salvaged from the truncated "
+                    "response. Continue the same patch artifact.\n\n"
+                    "SALVAGED PREFIX TAIL BEGIN\n"
+                    + prefix_tail
+                    + "\nSALVAGED PREFIX TAIL END\n\n"
+                    + instruction
+                )
+                continuation, prompt_tokens, completion_tokens = self._generate_once_sync(
+                    model,
+                    tokenizer,
+                    system=continuation_system,
+                    user=continuation_user,
+                    temperature=0.0,
+                    enable_thinking=self.structured_thinking_enabled,
+                )
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
+                combined = prefix + continuation.lstrip("\n")
+                try:
+                    parsed = _parse_patch_proposal(combined)
+                except ProviderError as exc:
                     diagnostic = self._generation_diagnostic(
-                        content,
+                        combined,
                         completion_tokens,
                         markers=(
                             "GRAPH_PATCH_V1",
@@ -809,7 +943,8 @@ class MLXLocalProvider(ModelProvider):
                     )
                     raise ProviderError(
                         "model did not return a valid patch envelope after one bounded "
-                        f"recovery attempt ({diagnostic})"
+                        "recovery and one truncation continuation "
+                        f"({diagnostic}, continuation_used=true)"
                     ) from exc
                 return parsed, total_prompt_tokens, total_completion_tokens
 
@@ -817,8 +952,18 @@ class MLXLocalProvider(ModelProvider):
             diagnostic = self._generation_diagnostic(
                 last_content,
                 last_completion_tokens,
+                markers=(
+                    "GRAPH_PATCH_V1",
+                    "GRAPH_PATCH_META_BEGIN",
+                    "GRAPH_PATCH_META_END",
+                    "GRAPH_PATCH_DIFF_BEGIN",
+                    "GRAPH_PATCH_DIFF_END",
+                ),
             )
-            raise ProviderError(f"invalid patch proposal ({diagnostic})") from last_error
+            raise ProviderError(
+                "model did not return a valid patch envelope after one bounded "
+                f"recovery attempt ({diagnostic})"
+            ) from last_error
 
 
     def _release_sync(self) -> None:
@@ -853,17 +998,32 @@ class MLXLocalProvider(ModelProvider):
         messages: list[dict[str, str]],
         *,
         add_generation_prompt: bool,
+        enable_thinking: bool | None = None,
     ) -> str | None:
         apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
         if not callable(apply_chat_template):
             return None
+        kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": add_generation_prompt,
+        }
+        if enable_thinking is not None:
+            kwargs["enable_thinking"] = enable_thinking
         try:
-            rendered = apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=add_generation_prompt,
-            )
+            rendered = apply_chat_template(messages, **kwargs)
             return rendered if isinstance(rendered, str) and rendered else None
+        except TypeError:
+            # Older or non-Qwen tokenizers may not expose enable_thinking.
+            # Retry the template without that optional control before falling
+            # back to the role-delimited renderer.
+            if "enable_thinking" in kwargs:
+                kwargs.pop("enable_thinking")
+                try:
+                    rendered = apply_chat_template(messages, **kwargs)
+                    return rendered if isinstance(rendered, str) and rendered else None
+                except Exception:  # noqa: BLE001 - backend-specific template errors
+                    return None
+            return None
         except Exception:  # noqa: BLE001 - tokenizer templates raise backend-specific errors
             return None
 
@@ -889,7 +1049,14 @@ class MLXLocalProvider(ModelProvider):
         return f"SYSTEM INSTRUCTIONS:\n{system}\n\nGRAPH STATE:\n{user}\n"
 
     @classmethod
-    def _render_prompt(cls, tokenizer: Any, *, system: str, user: str) -> str:
+    def _render_prompt(
+        cls,
+        tokenizer: Any,
+        *,
+        system: str,
+        user: str,
+        enable_thinking: bool | None = None,
+    ) -> str:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -898,6 +1065,7 @@ class MLXLocalProvider(ModelProvider):
             tokenizer,
             messages,
             add_generation_prompt=True,
+            enable_thinking=enable_thinking,
         )
         if rendered:
             return rendered
