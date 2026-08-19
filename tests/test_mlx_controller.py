@@ -301,3 +301,94 @@ async def test_runtime_accounts_for_hidden_policy_prefill_work(tmp_path: Path) -
         + state.metrics.completion_tokens
         + state.metrics.policy_prompt_tokens
     )
+
+
+class RouteLovingPolicy:
+    identity = "route-loving-policy"
+
+    def __init__(self, edge_count: int, route_index: int) -> None:
+        self.edge_count = edge_count
+        self.route_index = route_index
+        self.calls = 0
+
+    def predict(self, features):
+        del features
+        self.calls += 1
+        route_logits = [0.0, 0.0, 0.0]
+        route_logits[self.route_index] = 1_000_000.0
+        return PolicyOutput(
+            route_logits=tuple(route_logits),
+            edge_logits=tuple(0.0 for _ in range(self.edge_count)),
+            stop_logits=(0.0, 0.0, 0.0, 0.0),
+            success_value=0.5,
+            cost=(0.1, 0.1, 0.1),
+        )
+
+
+def test_shadow_route_scale_preserves_static_choice_and_records_no_intervention() -> None:
+    graph = load_default_graph()
+    policy = RouteLovingPolicy(edge_count=len(graph.edges), route_index=1)
+    controller = MLXGraphController(
+        graph=graph,
+        decision_backend=PythonDecisionBackend(),
+        policy=policy,
+        route_policy_scale=0.0,
+        transition_policy_scale=0.0,
+    )
+    state = RunState.new(graph=graph, task="quick fix: rename one variable")
+    decision = controller.select_route(state.task, state)
+
+    assert decision.route == "fast"
+    assert decision.source == "mlx-policy-shadow"
+    assert decision.policy_metrics["policy_evaluated"] is True
+    assert decision.policy_metrics["policy_could_change_choice"] is False
+    assert decision.policy_metrics["static_choice"] == "fast"
+    assert decision.policy_metrics["learned_choice"] == "fast"
+    assert decision.policy_metrics["choice_changed"] is False
+
+
+def test_skip_forced_policy_avoids_hidden_prefill_for_single_choice_transition(
+    tmp_path: Path,
+) -> None:
+    graph = load_default_graph()
+    source = RecordingHiddenSource(tmp_path / "hidden-forced")
+    policy = HiddenAwarePolicy(edge_count=len(graph.edges))
+    controller = MLXGraphController(
+        graph=graph,
+        decision_backend=PythonDecisionBackend(),
+        policy=policy,
+        hidden_state_source=source,
+        capture_hidden=True,
+        skip_forced_policy=True,
+    )
+    state = RunState.new(graph=graph, task="quick fix: rename one variable")
+    controller.select_route(state.task, state)
+    assert len(source.calls) == 1
+
+    state.current_node = "context"
+    state.step_count = 1
+    state.data.update({"route": "fast", "context_ready": True, "verdict": "pending"})
+    candidates = valid_outgoing_edges(graph, state, "context")
+    stop = controller.select_stop(
+        graph=graph,
+        state=state,
+        node_id="context",
+        candidates=candidates,
+    )
+    edge = controller.select_edge(
+        graph=graph,
+        state=state,
+        node_id="context",
+        candidates=candidates,
+        stop=stop,
+    )
+
+    assert len(source.calls) == 1
+    assert stop.source == "mlx-hardcoded-stop"
+    assert edge.source == "mlx-hard-masked-edge"
+    assert stop.policy_metrics["valid_choice_count"] == 1
+    assert edge.policy_metrics["valid_choice_count"] == 1
+    assert stop.policy_metrics["policy_context_evaluated"] is False
+    assert edge.policy_metrics["policy_context_evaluated"] is False
+    assert stop.policy_metrics["policy_evaluated"] is False
+    assert edge.policy_metrics["policy_evaluated"] is False

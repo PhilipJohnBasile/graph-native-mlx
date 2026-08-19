@@ -5,16 +5,16 @@ A graph-controlled coding-agent runtime for Apple Silicon. It combines a residen
 
 ## Project history and reproducibility archive
 
-This public repository preserves exact source snapshots from `v0.1.0` through `v0.5.6`.
+This public repository preserves exact source snapshots from `v0.1.0` through `v0.5.7`.
 
 - [`docs/journey/`](docs/journey/) — chronological problem → fix → result record
 - [`docs/evidence/`](docs/evidence/) — sanitized M5 Max and bootstrap evidence
 - [`releases/`](releases/) — original source ZIPs, wheels, checksums, and release metadata
-- Git tags `v0.1.0` through `v0.5.6` — exact source tree for every release
+- Git tags `v0.1.0` through `v0.5.7` — exact source tree for every release
 - [`PROVENANCE.md`](PROVENANCE.md) — inclusion, sanitization, and exclusion policy
 - [`PROJECT_STATUS.md`](PROJECT_STATUS.md) — proven results and the next scientific gate
 
-The active `main` branch is v0.5.6 plus archival documentation. No learned policy is activated yet; held-out policy evaluation is the next gate.
+The active source is v0.5.7. No learned policy is activated. The next gate is a causal paired static/shadow/route-only/full evaluation on the qualified M5 Max.
 
 The central rule is:
 
@@ -22,7 +22,7 @@ The central rule is:
 
 This is a compound model rather than a foundation-model pretraining run. The language model proposes plans, patches, diagnoses, repairs, and semantic reviews. The runtime owns state, permissions, effects, verification order, budgets, retries, termination, recovery, and promotion.
 
-## v0.5.6 capabilities
+## v0.5.7 capabilities
 
 ### MLX-native model and policy path
 
@@ -37,6 +37,18 @@ This is a compound model rather than a foundation-model pretraining run. The lan
 - Model, graph, extractor, configuration, and policy-weight identity checks
 - Hash-addressed projected-feature artifacts; raw prompts and raw hidden tensors are not persisted
 - Qwen thinking disabled by default for bounded structured artifacts, with an opt-in environment switch and legacy-tokenizer fallback
+
+### Causal policy evaluation and review adjudication
+
+- Static, shadow, route-only, and full-policy experiment arms
+- Byte-comparable model prompts through logical run/repository/worktree aliases
+- Hash-only prompt audit artifacts; raw prompts remain unpersisted
+- Prompt-derived deterministic MLX seed resets and temperature-zero paired runs
+- Independent route and transition residual scales
+- Forced-choice policy skipping and telemetry that distinguishes outputs from meaningful choices
+- Declarative held-out contract oracles for tests, changed files, newlines, and Python AST call relationships
+- Explicit authoritative evaluation contracts plus independent appeal for non-authoritative evidence
+- One-command M5 Max paired canary and strict static-shadow equivalence checks
 
 ### Hard graph and durable repository execution
 
@@ -71,6 +83,16 @@ This is a compound model rather than a foundation-model pretraining run. The lan
   - never add nodes, edges, effects, commands, or retries
 - Hash-verified graph bundles containing editable YAML, reproduced compiled tables, benchmark evidence, and a manifest
 - Runtime loading of bundle directories only when the bundle is marked `promoted` and passes full verification
+
+## Run the causal paired canary
+
+Candidate `855e378570a9` remains disabled. After configuring the qualified model and preserving the candidate weights under `.graph-model/policies/bootstrap-policy-v1`, run:
+
+```bash
+./scripts/run-paired-policy-canary-v2-mac.sh
+```
+
+The script creates one shared four-repository corpus and evaluates four isolated arms. A pass requires exact static-shadow equivalence, all expected outcomes, zero false successes, clean source repositories, and no persistent policy activation. A pass authorizes a larger evaluation only.
 
 ## Authority boundary
 
@@ -138,8 +160,8 @@ The model never applies its own patch. It returns a unified diff. The host valid
 ## Install on an M5 Max
 
 ```bash
-unzip graph-native-model-mlx-v0.5.6.zip
-cd graph-native-model-mlx-v0.5.6
+unzip graph-native-model-mlx-v0.5.7.zip
+cd graph-native-model-mlx-v0.5.7
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -155,10 +177,10 @@ The base package and portable tests work on non-MLX systems. The `mlx` extra is 
 
 The release includes a state-preserving upgrade helper. It keeps the existing virtual environment, `.graph-env`, `.graph-model` database, hidden-state artifacts, detached worktrees, and verified patches, while backing up the prior source tree.
 
-After extracting the v0.5.6 source archive:
+After extracting the v0.5.7 source archive:
 
 ```bash
-cd graph-native-model-mlx-v0.5.6
+cd graph-native-model-mlx-v0.5.7
 ./scripts/upgrade-mac-in-place.sh
 ```
 

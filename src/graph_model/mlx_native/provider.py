@@ -586,7 +586,14 @@ class MLXLocalProvider(ModelProvider):
         user: str,
         temperature: float,
         enable_thinking: bool | None = None,
+        seed: int | None = None,
     ) -> tuple[str, int, int]:
+        if seed is not None:
+            try:
+                import mlx.core as mx
+            except ImportError as exc:  # pragma: no cover - Apple Silicon only
+                raise ProviderError("deterministic MLX generation requires mlx") from exc
+            mx.random.seed(int(seed))
         prompt = self._render_prompt(
             tokenizer,
             system=system,
@@ -738,11 +745,27 @@ class MLXLocalProvider(ModelProvider):
         user: str,
         temperature: float | None = None,
     ) -> tuple[dict[str, Any], int, int]:
+        return await self.complete_json_seeded(
+            system=system,
+            user=user,
+            temperature=temperature,
+            seed=None,
+        )
+
+    async def complete_json_seeded(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+        seed: int | None,
+    ) -> tuple[dict[str, Any], int, int]:
         return await self._run_on_affinity_async(
             self._complete_json_sync,
             system,
             user,
             self.default_temperature if temperature is None else float(temperature),
+            seed,
         )
 
     def _complete_json_sync(
@@ -750,6 +773,7 @@ class MLXLocalProvider(ModelProvider):
         system: str,
         user: str,
         temperature: float,
+        seed: int | None = None,
     ) -> tuple[dict[str, Any], int, int]:
         if temperature < 0:
             raise ValueError("temperature must be >= 0")
@@ -788,6 +812,7 @@ class MLXLocalProvider(ModelProvider):
                     user=attempt_user,
                     temperature=attempt_temperature,
                     enable_thinking=self.structured_thinking_enabled,
+                    seed=(None if seed is None else (int(seed) + attempt) & 0xFFFFFFFF),
                 )
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
@@ -818,11 +843,27 @@ class MLXLocalProvider(ModelProvider):
         user: str,
         temperature: float | None = None,
     ) -> tuple[dict[str, Any], int, int]:
+        return await self.complete_patch_seeded(
+            system=system,
+            user=user,
+            temperature=temperature,
+            seed=None,
+        )
+
+    async def complete_patch_seeded(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+        seed: int | None,
+    ) -> tuple[dict[str, Any], int, int]:
         return await self._run_on_affinity_async(
             self._complete_patch_sync,
             system,
             user,
             self.default_temperature if temperature is None else float(temperature),
+            seed,
         )
 
     def _complete_patch_sync(
@@ -830,6 +871,7 @@ class MLXLocalProvider(ModelProvider):
         system: str,
         user: str,
         temperature: float,
+        seed: int | None = None,
     ) -> tuple[dict[str, Any], int, int]:
         if temperature < 0:
             raise ValueError("temperature must be >= 0")
@@ -875,6 +917,7 @@ class MLXLocalProvider(ModelProvider):
                     user=attempt_user,
                     temperature=attempt_temperature,
                     enable_thinking=self.structured_thinking_enabled,
+                    seed=(None if seed is None else (int(seed) + attempt) & 0xFFFFFFFF),
                 )
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
@@ -923,6 +966,7 @@ class MLXLocalProvider(ModelProvider):
                     user=continuation_user,
                     temperature=0.0,
                     enable_thinking=self.structured_thinking_enabled,
+                    seed=(None if seed is None else (int(seed) + 2) & 0xFFFFFFFF),
                 )
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens

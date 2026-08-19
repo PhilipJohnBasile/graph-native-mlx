@@ -79,6 +79,10 @@ def _hidden_summary(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     sources: Counter[str] = Counter()
     cache_hits = 0
     decisions = 0
+    forced_decisions = 0
+    skipped_policy_contexts = 0
+    meaningful_policy_choices = 0
+    choice_changes = 0
     for event in events:
         for decision in _decision_payloads(event):
             decisions += 1
@@ -88,6 +92,18 @@ def _hidden_summary(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             metrics = decision.get("policy_metrics")
             if not isinstance(metrics, Mapping):
                 continue
+            try:
+                valid_choice_count = int(metrics.get("valid_choice_count", 0) or 0)
+            except (TypeError, ValueError):
+                valid_choice_count = 0
+            if valid_choice_count == 1:
+                forced_decisions += 1
+            if metrics.get("policy_context_evaluated") is False:
+                skipped_policy_contexts += 1
+            if metrics.get("policy_could_change_choice") is True:
+                meaningful_policy_choices += 1
+            if metrics.get("choice_changed") is True:
+                choice_changes += 1
             hidden = metrics.get("hidden_state")
             if not isinstance(hidden, Mapping):
                 continue
@@ -118,6 +134,10 @@ def _hidden_summary(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "decision_sources": dict(sorted(sources.items())),
         "unique_artifacts": len(artifacts),
         "cache_hits": cache_hits,
+        "forced_decisions": forced_decisions,
+        "skipped_policy_contexts": skipped_policy_contexts,
+        "meaningful_policy_choices": meaningful_policy_choices,
+        "choice_changes": choice_changes,
         "feature_sizes": feature_sizes,
         "raw_hidden_sizes": raw_sizes,
         "unique_prompt_tokens": prompt_tokens,
@@ -144,6 +164,37 @@ def _command_summary(command: Mapping[str, Any]) -> dict[str, Any]:
         "passed": command.get("passed"),
         "timed_out": command.get("timed_out"),
         "duration_seconds": command.get("duration_seconds"),
+    }
+
+
+def _prompt_audit_summary(state: RunState) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    for name, value in sorted(state.artifacts.items()):
+        if not str(name).startswith("prompt-audit-") or not isinstance(value, Mapping):
+            continue
+        records.append(
+            {
+                "artifact": str(name),
+                "case_id": value.get("case_id"),
+                "node_id": value.get("node_id"),
+                "call_kind": value.get("call_kind"),
+                "revision": value.get("revision"),
+                "system_sha256": value.get("system_sha256"),
+                "user_sha256": value.get("user_sha256"),
+                "combined_sha256": value.get("combined_sha256"),
+                "generation_seed": value.get("generation_seed"),
+                "raw_prompts_persisted": bool(
+                    value.get("raw_system_persisted")
+                    or value.get("raw_user_persisted")
+                ),
+            }
+        )
+    return {
+        "count": len(records),
+        "raw_prompts_persisted": any(
+            bool(record.get("raw_prompts_persisted")) for record in records
+        ),
+        "records": records,
     }
 
 
@@ -236,6 +287,7 @@ def build_run_report(store: SQLiteRunStore, run_id: str) -> dict[str, Any]:
         "run": summarize_run(state),
         "path": list(state.completed_nodes),
         "hidden_policy": _hidden_summary(events),
+        "prompt_audits": _prompt_audit_summary(state),
         "verification": _verification_summary(state),
         "patch": {
             "kind": "verified" if isinstance(verified_patch, Mapping) else (

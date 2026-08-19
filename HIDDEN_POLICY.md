@@ -197,3 +197,30 @@ scripts/collect-bootstrap-policy-corpus-mac.sh
 ```
 
 The bootstrap collector uses a dedicated database and does not activate policy weights. It exports successful and failed records; failed records have zero route/edge/stop imitation weight in v0.5.3 but remain available for value and cost learning. Treat the fixtures as pipeline qualification data, not as a production-quality training corpus.
+
+## Causal paired evaluation in v0.5.7
+
+Paired evaluation separates policy effects from prompt, path, timing, and random-stream effects.
+
+The live state retains actual run IDs and paths for checkpoint and Git safety. The prompt copy uses stable aliases and normalizes timing. Every model call stores hashes and a deterministic seed, never raw prompt text.
+
+Policy interventions are independently controlled:
+
+```bash
+export GRAPH_MODEL_MLX_ROUTE_POLICY_SCALE=0
+export GRAPH_MODEL_MLX_TRANSITION_POLICY_SCALE=0
+export GRAPH_MODEL_MLX_SKIP_FORCED_POLICY=true
+```
+
+A forced transition with one graph-valid choice is not treated as a learned decision. When forced-choice skipping is enabled, no policy hidden forward or sidecar inference is performed for that transition.
+
+The four deployment arms are:
+
+```text
+static      no policy
+shadow      policy loaded, route=0, transition=0
+route-only  policy loaded, route=1, transition=0
+full        policy loaded, route=1, transition=1
+```
+
+Static and shadow must match exactly before route or transition effects are interpreted.

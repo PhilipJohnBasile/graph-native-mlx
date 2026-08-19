@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .controller import GraphController
 from .models import GraphSpec, RunState
+from .paired_eval import evaluation_state_payload
 from .provider import ModelProvider
 from .runtime import GraphRuntime
 from .store import SQLiteRunStore
@@ -25,6 +26,11 @@ class RepositoryTraceTask:
     workspace_mode: str = "worktree"
     allow_sensitive_paths: bool = False
     tags: tuple[str, ...] = ()
+    case_id: str = ""
+    repository_alias: str = ""
+    paired_evaluation: bool = False
+    evaluation_seed: int = 42_057
+    contract_oracle: dict[str, Any] | None = None
 
     @classmethod
     def from_mapping(
@@ -53,6 +59,21 @@ class RepositoryTraceTask:
                 raise ValueError(f"trace manifest record {index}: {name} must be a list")
             return tuple(str(item).strip() for item in value if str(item).strip())
 
+        contract_oracle = payload.get("contract_oracle")
+        if contract_oracle is not None and not isinstance(contract_oracle, dict):
+            raise ValueError(
+                f"trace manifest record {index}: contract_oracle must be an object"
+            )
+        try:
+            evaluation_seed = int(payload.get("evaluation_seed", 42_057))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"trace manifest record {index}: evaluation_seed must be an integer"
+            ) from exc
+        if evaluation_seed < 0:
+            raise ValueError(
+                f"trace manifest record {index}: evaluation_seed must be non-negative"
+            )
         return cls(
             run_id=run_id,
             task=task,
@@ -63,6 +84,11 @@ class RepositoryTraceTask:
             workspace_mode=str(payload.get("workspace_mode", "worktree")).strip(),
             allow_sensitive_paths=bool(payload.get("allow_sensitive_paths", False)),
             tags=strings("tags"),
+            case_id=str(payload.get("case_id", "")).strip(),
+            repository_alias=str(payload.get("repository_alias", "")).strip(),
+            paired_evaluation=bool(payload.get("paired_evaluation", False)),
+            evaluation_seed=evaluation_seed,
+            contract_oracle=(dict(contract_oracle) if contract_oracle is not None else None),
         )
 
 
@@ -274,7 +300,16 @@ async def collect_repository_traces(
             initial_data["trace_manifest"] = {
                 "tags": list(task.tags),
                 "manifest_repo": str(Path(task.repo).expanduser()),
+                "case_id": task.case_id or None,
             }
+            if task.paired_evaluation:
+                initial_data["_paired_evaluation"] = evaluation_state_payload(
+                    case_id=(task.case_id or task.run_id),
+                    repository_alias=(task.repository_alias or None),
+                    base_seed=task.evaluation_seed,
+                )
+            if task.contract_oracle is not None:
+                initial_data["contract_oracle"] = dict(task.contract_oracle)
             state = await runtime.run(
                 task.task,
                 run_id=task.run_id,

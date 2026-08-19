@@ -165,3 +165,21 @@ A policy config is bound to:
 - policy configuration and weight hashes
 
 A mismatch fails closed before a policy decision is used.
+
+## v0.5.7 deterministic paired path
+
+The MLX provider exposes seeded structured-JSON and patch-generation calls for evaluation. Before each paired call it resets the MLX random stream to a seed derived from the canonical prompt identity. Recovery calls use deterministic bounded offsets from the same seed.
+
+Normal runtime calls remain unchanged when paired evaluation is absent.
+
+The paired runner sets:
+
+```text
+temperature 0
+top_p       1
+top_k       0
+```
+
+Prompt audit artifacts contain only SHA-256 values, node/call identity, revision, and seed. Raw system and user prompts are not written.
+
+The controller exposes separate route and transition residual scales and records whether a policy could actually alter a choice. With forced-choice skipping enabled, transitions with a single graph-valid candidate bypass hidden capture and policy inference while retaining the host's hard-mask validation.

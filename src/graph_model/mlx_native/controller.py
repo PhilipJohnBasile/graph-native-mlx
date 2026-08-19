@@ -121,18 +121,28 @@ class MLXGraphController:
         decision_backend: DecisionBackend | None = None,
         policy: PolicyPredictor | None = None,
         policy_scale: float = 1.0,
+        route_policy_scale: float | None = None,
+        transition_policy_scale: float | None = None,
+        skip_forced_policy: bool = False,
         hidden_state_source: HiddenStateSource | None = None,
         capture_hidden: bool = False,
         affinity_executor: AffinityExecutor | None = None,
     ) -> None:
-        if policy_scale < 0:
-            raise ValueError("policy_scale must be non-negative")
+        route_scale = policy_scale if route_policy_scale is None else route_policy_scale
+        transition_scale = (
+            policy_scale if transition_policy_scale is None else transition_policy_scale
+        )
+        if policy_scale < 0 or route_scale < 0 or transition_scale < 0:
+            raise ValueError("policy scales must be non-negative")
         self.graph = graph
         self.tables = _resolve_tables(graph, tables)
         self.tables.validate_graph(graph)
         self.backend = decision_backend or MLXDecisionBackend()
         self.policy = policy
         self.policy_scale = float(policy_scale)
+        self.route_policy_scale = float(route_scale)
+        self.transition_policy_scale = float(transition_scale)
+        self.skip_forced_policy = bool(skip_forced_policy)
         self.hidden_state_source = hidden_state_source
         self.capture_hidden = bool(capture_hidden)
         if bool(getattr(policy, "requires_hidden", False)):
@@ -229,6 +239,24 @@ class MLXGraphController:
             decision_backend=decision_backend,
             policy=policy,
             policy_scale=float(os.getenv("GRAPH_MODEL_MLX_POLICY_SCALE", "1.0")),
+            route_policy_scale=float(
+                os.getenv(
+                    "GRAPH_MODEL_MLX_ROUTE_POLICY_SCALE",
+                    os.getenv("GRAPH_MODEL_MLX_POLICY_SCALE", "1.0"),
+                )
+            ),
+            transition_policy_scale=float(
+                os.getenv(
+                    "GRAPH_MODEL_MLX_TRANSITION_POLICY_SCALE",
+                    os.getenv("GRAPH_MODEL_MLX_POLICY_SCALE", "1.0"),
+                )
+            ),
+            skip_forced_policy=(
+                os.getenv("GRAPH_MODEL_MLX_SKIP_FORCED_POLICY", "false")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            ),
             hidden_state_source=hidden_state_source,
             capture_hidden=capture_hidden,
             affinity_executor=(
@@ -242,11 +270,14 @@ class MLXGraphController:
     def identity(self) -> dict[str, str]:
         return {
             "kind": "mlx-graph-controller",
-            "version": "4",
+            "version": "5",
             "graph_schema_hash": self.tables.schema_hash,
             "decision_backend": self.backend.identity,
             "policy": self.policy.identity if self.policy is not None else "hardcoded-priors-only",
             "policy_scale": f"{self.policy_scale:g}",
+            "route_policy_scale": f"{self.route_policy_scale:g}",
+            "transition_policy_scale": f"{self.transition_policy_scale:g}",
+            "skip_forced_policy": str(self.skip_forced_policy).lower(),
             "hidden_capture": str(self.capture_hidden).lower(),
             "hidden_state": (
                 self.hidden_state_source.hidden_state_identity
@@ -261,6 +292,7 @@ class MLXGraphController:
         node_id: str,
         *,
         decision_type: str,
+        evaluate_policy: bool = True,
     ) -> _PolicyContext:
         key = (
             state.run_id,
@@ -276,6 +308,7 @@ class MLXGraphController:
             state.metrics.llm_calls,
             state.metrics.tool_calls,
             state.metrics.total_tokens,
+            evaluate_policy,
         )
         with self._cache_lock:
             if key == self._cached_context_key and self._cached_context is not None:
@@ -288,7 +321,11 @@ class MLXGraphController:
                 node_id,
             )
             observation: HiddenStateObservation | None = None
-            if self.capture_hidden and self.hidden_state_source is not None:
+            if (
+                evaluate_policy
+                and self.capture_hidden
+                and self.hidden_state_source is not None
+            ):
                 observation = self.hidden_state_source.capture_policy_hidden(
                     state=state,
                     node_id=node_id,
@@ -296,7 +333,7 @@ class MLXGraphController:
                 )
 
             output: PolicyOutput | None = None
-            if self.policy is not None:
+            if evaluate_policy and self.policy is not None:
                 if self.affinity_executor is not None:
                     output = self.affinity_executor.run_on_affinity(
                         self._predict_policy,
@@ -370,10 +407,27 @@ class MLXGraphController:
             )
         return self.backend.masked_softmax_argmax(logits, mask)
 
-    def _decision_metrics(self, context: _PolicyContext) -> dict[str, object]:
+    def _decision_metrics(
+        self,
+        context: _PolicyContext,
+        *,
+        valid_choice_count: int,
+        policy_context_evaluated: bool,
+        policy_could_change_choice: bool,
+        static_choice: str,
+        learned_choice: str,
+    ) -> dict[str, object]:
+        policy_evaluated = context.output is not None
         metrics: dict[str, object] = {
             "graph_schema_hash": self.tables.schema_hash,
             "feature_vector": list(context.explicit_features),
+            "valid_choice_count": int(valid_choice_count),
+            "policy_context_evaluated": bool(policy_context_evaluated),
+            "policy_evaluated": policy_evaluated,
+            "policy_could_change_choice": bool(policy_could_change_choice),
+            "static_choice": static_choice,
+            "learned_choice": learned_choice,
+            "choice_changed": static_choice != learned_choice,
         }
         if context.observation is not None:
             metrics["hidden_state"] = context.observation.reference.as_dict()
@@ -383,17 +437,29 @@ class MLXGraphController:
 
     def select_route(self, task: str, state: RunState) -> RouteDecision:
         fallback = rule_route(task)
-        logits = [0.0] * len(ROUTES)
-        logits[ROUTES.index(fallback)] = 8.0
+        base_logits = [0.0] * len(ROUTES)
+        base_logits[ROUTES.index(fallback)] = 8.0
+        static = self._masked_choice(base_logits, [True] * len(ROUTES))
+        static_route = ROUTES[static.selected_index]
         context = self._context(state, self.graph.start, decision_type="route")
+        logits = list(base_logits)
         if context.output is not None:
-            logits = _add_logits(logits, context.output.route_logits, self.policy_scale)
+            logits = _add_logits(
+                logits,
+                context.output.route_logits,
+                self.route_policy_scale,
+            )
         choice = self._masked_choice(logits, [True] * len(ROUTES))
         route = ROUTES[choice.selected_index]
         probabilities = {
             name: float(choice.probabilities[index]) for index, name in enumerate(ROUTES)
         }
-        source = "mlx-policy-residual" if context.output is not None else "mlx-hardcoded-route"
+        if context.output is None:
+            source = "mlx-hardcoded-route"
+        elif self.route_policy_scale == 0:
+            source = "mlx-policy-shadow"
+        else:
+            source = "mlx-policy-residual"
         notes = (
             "MLX selected among the three validated route IDs; graph structure remains external.",
         )
@@ -404,7 +470,16 @@ class MLXGraphController:
             source=source,
             rule_route=fallback,
             notes=notes,
-            policy_metrics=self._decision_metrics(context),
+            policy_metrics=self._decision_metrics(
+                context,
+                valid_choice_count=len(ROUTES),
+                policy_context_evaluated=True,
+                policy_could_change_choice=(
+                    context.output is not None and self.route_policy_scale > 0
+                ),
+                static_choice=static_route,
+                learned_choice=route,
+            ),
         )
 
     def select_stop(
@@ -423,18 +498,30 @@ class MLXGraphController:
             allowed_actions.add("abort")
 
         action_mask = [action in allowed_actions for action in STOP_ACTIONS]
-        # The prior follows the highest-priority candidate. A trained policy can rank any action
-        # represented by a currently valid candidate, but cannot unmask another action.
+        valid_choice_count = sum(action_mask)
         prior_action = (
             _action_for_target(candidates[0].target)
             if candidates
             else ("abort" if node_id == "abort" else "finish")
         )
-        logits = [0.0] * len(STOP_ACTIONS)
-        logits[STOP_ACTIONS.index(prior_action)] = 8.0
-        context = self._context(state, node_id, decision_type="transition")
+        base_logits = [0.0] * len(STOP_ACTIONS)
+        base_logits[STOP_ACTIONS.index(prior_action)] = 8.0
+        static = self._masked_choice(base_logits, action_mask)
+        static_action = STOP_ACTIONS[static.selected_index]
+        evaluate = not (self.skip_forced_policy and valid_choice_count <= 1)
+        context = self._context(
+            state,
+            node_id,
+            decision_type="transition",
+            evaluate_policy=evaluate,
+        )
+        logits = list(base_logits)
         if context.output is not None:
-            logits = _add_logits(logits, context.output.stop_logits, self.policy_scale)
+            logits = _add_logits(
+                logits,
+                context.output.stop_logits,
+                self.transition_policy_scale,
+            )
         choice = self._masked_choice(logits, action_mask)
         action = STOP_ACTIONS[choice.selected_index]
         probabilities = {
@@ -446,16 +533,33 @@ class MLXGraphController:
             "finish": "finish",
             "abort": "abort",
         }.get(action)
+        if context.output is None:
+            source = "mlx-hardcoded-stop"
+        elif self.transition_policy_scale == 0:
+            source = "mlx-policy-shadow"
+        else:
+            source = "mlx-policy-residual"
         return StopDecision(
             action=action,
             confidence=probabilities[action],
             probabilities=probabilities,
-            source="mlx-policy-residual" if context.output is not None else "mlx-hardcoded-stop",
+            source=source,
             preferred_target=preferred_target,
             allowed_actions=tuple(
                 action_name for action_name in STOP_ACTIONS if action_name in allowed_actions
             ),
-            policy_metrics=self._decision_metrics(context),
+            policy_metrics=self._decision_metrics(
+                context,
+                valid_choice_count=valid_choice_count,
+                policy_context_evaluated=evaluate,
+                policy_could_change_choice=(
+                    context.output is not None
+                    and self.transition_policy_scale > 0
+                    and valid_choice_count > 1
+                ),
+                static_choice=static_action,
+                learned_choice=action,
+            ),
         )
 
     def select_edge(
@@ -476,7 +580,7 @@ class MLXGraphController:
         if unknown:
             raise ValueError(f"runtime candidates are absent from compiled graph: {sorted(unknown)}")
 
-        logits = [priority / 10.0 for priority in self.tables.edge_priorities]
+        base_logits = [priority / 10.0 for priority in self.tables.edge_priorities]
         mask: list[bool] = []
         for index, edge_key in enumerate(self.tables.edge_keys):
             traversal_available = (
@@ -490,11 +594,25 @@ class MLXGraphController:
             )
             mask.append(allowed)
             if allowed and stop.preferred_target == candidate_by_key[edge_key].target:
-                logits[index] += 6.0
+                base_logits[index] += 6.0
 
-        context = self._context(state, node_id, decision_type="transition")
+        valid_choice_count = sum(mask)
+        static = self._masked_choice(base_logits, mask)
+        static_edge_key = self.tables.edge_keys[static.selected_index]
+        evaluate = not (self.skip_forced_policy and valid_choice_count <= 1)
+        context = self._context(
+            state,
+            node_id,
+            decision_type="transition",
+            evaluate_policy=evaluate,
+        )
+        logits = list(base_logits)
         if context.output is not None:
-            logits = _add_logits(logits, context.output.edge_logits, self.policy_scale)
+            logits = _add_logits(
+                logits,
+                context.output.edge_logits,
+                self.transition_policy_scale,
+            )
         choice = self._masked_choice(logits, mask)
         edge_key = self.tables.edge_keys[choice.selected_index]
         chosen = candidate_by_key[edge_key]
@@ -502,11 +620,28 @@ class MLXGraphController:
             candidate.key: float(choice.probabilities[self.tables.edge_index[candidate.key]])
             for candidate in candidates
         }
+        if context.output is None:
+            source = "mlx-hard-masked-edge"
+        elif self.transition_policy_scale == 0:
+            source = "mlx-policy-shadow"
+        else:
+            source = "mlx-policy-residual"
         return EdgeDecision(
             edge=chosen,
             confidence=probabilities[chosen.key],
             probabilities=probabilities,
             allowed_edge_keys=tuple(candidate.key for candidate in candidates),
-            source="mlx-policy-residual" if context.output is not None else "mlx-hard-masked-edge",
-            policy_metrics=self._decision_metrics(context),
+            source=source,
+            policy_metrics=self._decision_metrics(
+                context,
+                valid_choice_count=valid_choice_count,
+                policy_context_evaluated=evaluate,
+                policy_could_change_choice=(
+                    context.output is not None
+                    and self.transition_policy_scale > 0
+                    and valid_choice_count > 1
+                ),
+                static_choice=static_edge_key,
+                learned_choice=edge_key,
+            ),
         )

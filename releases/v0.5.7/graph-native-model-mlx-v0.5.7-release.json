@@ -1,0 +1,50 @@
+{
+  "artifacts": [
+    {
+      "bytes": 242034,
+      "name": "graph-native-model-mlx-v0.5.7.zip",
+      "sha256": "9ba4facb31ed1e7aa45a87fce66362b63fc4d69298c2890593fdd479c6115239"
+    },
+    {
+      "bytes": 149806,
+      "name": "graph_native_model-0.5.7-py3-none-any.whl",
+      "sha256": "a4f9584c22df67a5bacb0e1f72cdfdea0c3e739529269657c46e93bbef4e80f4"
+    }
+  ],
+  "features": [
+    "canonical static-shadow-route-only-full paired evaluation",
+    "hash-only model-prompt audit records",
+    "prompt-derived deterministic MLX generation seeds",
+    "independent route and transition policy scales",
+    "forced-choice policy skipping and meaningful-choice telemetry",
+    "declarative contract oracles and semantic-review adjudication",
+    "shared held-out fixture generator, M5 runner, and strict comparator"
+  ],
+  "graph": {
+    "edges": 19,
+    "name": "coding-supergraph",
+    "nodes": 12,
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "terminals": [
+      "abort",
+      "finish"
+    ],
+    "version": "0.3.0"
+  },
+  "hardware_boundary": "The four-arm causal paired canary must be executed on the qualified M5 Max with candidate 855e378570a9 before any promotion decision.",
+  "name": "graph-native-model-mlx",
+  "portable_validation": {
+    "environment": "Linux x86-64 / Python 3.13",
+    "graph_schema_unchanged": true,
+    "source_checkout_tests": 135,
+    "source_checkout_tests_passed_in_isolated_groups": true,
+    "source_archive_import_and_graph_validation": true,
+    "wheel_direct_import_and_cli_validation": true
+  },
+  "policy": {
+    "candidate": "855e378570a9",
+    "globally_activated": false,
+    "promotion_status": "disabled-pending-causal-paired-evaluation"
+  },
+  "version": "0.5.7"
+}

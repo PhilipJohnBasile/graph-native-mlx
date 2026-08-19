@@ -59,6 +59,8 @@ def _policy_metrics_from_decision(value: Any) -> dict[str, Any] | None:
     metrics = value.get("policy_metrics")
     if not isinstance(metrics, dict) or not metrics.get("graph_schema_hash"):
         return None
+    if metrics.get("policy_context_evaluated") is False:
+        return None
     return metrics
 
 

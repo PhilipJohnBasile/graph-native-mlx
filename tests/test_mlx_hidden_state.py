@@ -8,6 +8,7 @@ import pytest
 
 from graph_model.graph import load_default_graph
 from graph_model.models import RunState
+from graph_model.paired_eval import evaluation_state_payload
 from graph_model.mlx_native.hidden_state import (
     HIDDEN_STATE_FORMAT,
     HiddenStateArtifactStore,
@@ -217,3 +218,52 @@ def test_hidden_schema_binds_policy_state_prompt_contract() -> None:
     }
     assert payload["schema_hash"]
     assert len(payload["schema_hash"]) == 64
+
+
+def test_paired_policy_state_prompt_normalizes_paths_run_ids_and_timing() -> None:
+    graph = load_default_graph()
+
+    def state(run_id: str, root: str, elapsed: float) -> RunState:
+        value = RunState.new(
+            graph=graph,
+            task="Audit the paired graph state",
+            run_id=run_id,
+            initial_data={
+                "_paired_evaluation": evaluation_state_payload(
+                    case_id="paired-state",
+                    repository_alias="<repository:paired-state>",
+                ),
+                "workspace": {
+                    "source_root": root + "/source",
+                    "active_root": root + "/worktree",
+                    "artifact_root": root + "/artifacts",
+                },
+                "route": "repair",
+                "verdict": "pass",
+                "test_report": {
+                    "verdict": "pass",
+                    "duration_seconds": elapsed,
+                    "path": root + "/worktree/tests",
+                },
+            },
+        )
+        value.current_node = "review"
+        value.step_count = 7
+        value.metrics.elapsed_seconds = elapsed
+        return value
+
+    static = state("static-arm", "/tmp/static", 1.0)
+    shadow = state("shadow-arm", "/tmp/shadow", 99.0)
+    _, static_prompt = policy_state_prompt(
+        static, node_id="review", decision_type="transition"
+    )
+    _, shadow_prompt = policy_state_prompt(
+        shadow, node_id="review", decision_type="transition"
+    )
+
+    assert static_prompt == shadow_prompt
+    assert "/tmp/static" not in static_prompt
+    assert "/tmp/shadow" not in shadow_prompt
+    payload = json.loads(static_prompt)
+    assert payload["execution"]["metrics"]["elapsed_seconds"] == 0.0
+    assert payload["execution"]["budget_remaining"]["seconds"] == static.budget.max_seconds

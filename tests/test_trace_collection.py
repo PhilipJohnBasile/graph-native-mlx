@@ -291,3 +291,42 @@ async def test_trace_collection_can_retry_only_collector_terminalized_failure(
     assert progress[1]["event"] == "task_retry"
     assert any(event["event"] == "task_done" for event in progress)
     assert any(event["event_type"] == "collector_retry" for event in store.events(task.run_id))
+
+
+def test_trace_manifest_accepts_paired_evaluation_and_contract_oracle(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "paired.jsonl"
+    oracle = {
+        "name": "shared-decoder",
+        "checks": [
+            {
+                "kind": "python_function_calls",
+                "path": "paging/query.py",
+                "function": "query_offset",
+                "callee": "decode_cursor",
+            }
+        ],
+    }
+    manifest.write_text(
+        json.dumps(
+            {
+                "run_id": "paired-case",
+                "repo": "/tmp/project-a",
+                "task": "Verify the paired case",
+                "case_id": "pagination",
+                "repository_alias": "<repository:pagination>",
+                "paired_evaluation": True,
+                "evaluation_seed": 1234,
+                "contract_oracle": oracle,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    task = read_repository_trace_manifest(manifest)[0]
+    assert task.case_id == "pagination"
+    assert task.repository_alias == "<repository:pagination>"
+    assert task.paired_evaluation is True
+    assert task.evaluation_seed == 1234
+    assert task.contract_oracle == oracle
