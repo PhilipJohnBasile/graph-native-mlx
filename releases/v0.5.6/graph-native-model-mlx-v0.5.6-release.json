@@ -1,0 +1,43 @@
+{
+  "artifacts": [
+    {
+      "bytes": 210192,
+      "name": "graph-native-model-mlx-v0.5.6.zip",
+      "sha256": "65035c6981364843c1cbe8617f6b326a1569f24a42ec37394754f26d40ffa910"
+    },
+    {
+      "bytes": 140078,
+      "name": "graph_native_model-0.5.6-py3-none-any.whl",
+      "sha256": "641b53837912b78a8e90086db55b5eabf2b6fa1175a8f292a25f5e6ce6b136c1"
+    }
+  ],
+  "features": [
+    "thinking-disabled bounded structured generation for compatible Qwen chat templates",
+    "legacy tokenizer fallback when enable_thinking is unsupported",
+    "one truncation-only GRAPH_PATCH_V1 continuation after deterministic recovery",
+    "partial-metadata discard and complete-line raw-diff salvage",
+    "resume and model-fingerprint compatibility with the nine completed v0.5.5 corpus runs"
+  ],
+  "graph": {
+    "edges": 19,
+    "name": "coding-supergraph",
+    "nodes": 12,
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "terminals": [
+      "abort",
+      "finish"
+    ],
+    "version": "0.3.0"
+  },
+  "hardware_boundary": "Actual Apple Metal inference and the task-10 Qwen3.8 checkpoint resume must be validated on the target M5 Max after upgrade.",
+  "name": "graph-native-model-mlx",
+  "portable_validation": {
+    "environment": "Linux x86-64 / Python 3.13",
+    "generated_graph_reproducible": true,
+    "source_archive_retested": true,
+    "tests": 118,
+    "wheel_isolated_import_and_cli": true,
+    "wheel_record_verified": true
+  },
+  "version": "0.5.6"
+}

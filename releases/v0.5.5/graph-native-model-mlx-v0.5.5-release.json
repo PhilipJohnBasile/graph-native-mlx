@@ -1,0 +1,42 @@
+{
+  "artifacts": [
+    {
+      "bytes": 207002,
+      "name": "graph-native-model-mlx-v0.5.5.zip",
+      "sha256": "c76219d85b92cb799b43ad345002cf00e0e08163fbcdeb44d55e63f9635f86dd"
+    },
+    {
+      "bytes": 138240,
+      "name": "graph_native_model-0.5.5-py3-none-any.whl",
+      "sha256": "e7bb8f62680aa10151da519eeac6de75652c8deb69f758daee15a50087586a03"
+    }
+  ],
+  "features": [
+    "GRAPH_PATCH_V1 raw-text patch envelope with compact JSON metadata",
+    "exactly one deterministic patch-envelope recovery attempt",
+    "multi-file patch-native repository integration",
+    "collector-error-only checkpoint reopening and resume",
+    "append-only event sequencing across collector retries"
+  ],
+  "graph": {
+    "edges": 19,
+    "name": "coding-supergraph",
+    "nodes": 12,
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "terminals": [
+      "abort",
+      "finish"
+    ],
+    "version": "0.3.0"
+  },
+  "hardware_boundary": "Actual Apple Metal inference and the task-9 Qwen3.8 retry must be validated on the target M5 Max after upgrade.",
+  "name": "graph-native-model-mlx",
+  "portable_validation": {
+    "environment": "Linux x86-64 / Python 3.13",
+    "generated_graph_reproducible": true,
+    "source_archive_retested": true,
+    "tests": 113,
+    "wheel_isolated_import_and_cli": true
+  },
+  "version": "0.5.5"
+}

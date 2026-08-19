@@ -1,0 +1,43 @@
+{
+  "package": "graph-native-model",
+  "version": "0.5.2",
+  "release_date": "2026-08-18",
+  "graph": {
+    "name": "coding-supergraph",
+    "version": "0.3.0",
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "nodes": 12,
+    "edges": 19,
+    "terminals": 2
+  },
+  "highlights": [
+    "Fresh external Python bytecode cache for every verifier command, preventing same-second same-size repairs from reusing stale .pyc code",
+    "User-site Python imports disabled inside bounded verifier commands for reproducible repository tests",
+    "Deterministic stale-bytecode regression plus repeated real repair-integration validation",
+    "In-place Apple-Silicon upgrader invokes the retained virtual environment and graph-model CLI by absolute path"
+  ],
+  "validation": {
+    "portable_tests_passed": 99,
+    "formerly_flaky_repair_test_repeated_passes": 4,
+    "source_archive_retested": true,
+    "generated_graph_exact_match": true,
+    "git_diff_check": true,
+    "shell_syntax_check": true,
+    "isolated_wheel_install": true,
+    "installed_cli_validate": true,
+    "apple_silicon_hardware_qualification_performed_for_this_build": false
+  },
+  "artifacts": {
+    "source": {
+      "filename": "graph-native-model-mlx-v0.5.2.zip",
+      "sha256": "fed833e0f6ad521168ec809a12de0a7754da6fb936117a7de49b452e8ecc71bd",
+      "bytes": 196412
+    },
+    "wheel": {
+      "filename": "graph_native_model-0.5.2-py3-none-any.whl",
+      "sha256": "3a031a8077b32020331c9ee5c967d94c686bcaafbf8f8748db6a578d35e79d39",
+      "bytes": 133675
+    }
+  },
+  "hardware_gate": "The in-place upgrade helper reruns graph-model qualify-mac on the target Apple Silicon Mac after installing v0.5.2."
+}

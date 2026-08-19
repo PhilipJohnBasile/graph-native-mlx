@@ -1,0 +1,54 @@
+{
+  "artifacts": {
+    "graph-native-model-mlx-v0.5.0.zip": {
+      "bytes": 180267,
+      "entries": 78,
+      "sha256": "7775aa561b812a083c0564c3dfa7e4e0f24c0cc8427d275bdb737a926d5ebbaf"
+    },
+    "graph_native_model-0.5.0-py3-none-any.whl": {
+      "bytes": 129335,
+      "entries": 44,
+      "sha256": "8a23c3393c7bb83c168ab6384a5e4ca4c90315e72fb94811a59686b235da34e1"
+    }
+  },
+  "capabilities_added": [
+    "one-command Mac MLX qualification evidence",
+    "constrained synchronous and asynchronous MCTS",
+    "real graph-execution optimization objective",
+    "held-out validation leakage checks",
+    "hard graph-mutation safety envelope",
+    "hash-verified promoted graph bundles",
+    "runtime enforcement of promoted bundle status"
+  ],
+  "graph": {
+    "edges": 19,
+    "name": "coding-supergraph",
+    "nodes": 12,
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "terminals": [
+      "abort",
+      "finish"
+    ],
+    "topology_version": "0.3.0"
+  },
+  "hardware_validation": {
+    "apple_mlx_metal_executed": false,
+    "reason": "The build environment is Linux x86-64 without Apple Metal.",
+    "required_command": "graph-model qualify-mac --output-dir .graph-model/qualification"
+  },
+  "name": "graph-native-model",
+  "package_version": "0.5.0",
+  "portable_validation": {
+    "clean_source_archive_retested": true,
+    "compileall": true,
+    "generated_graph_reproducible": true,
+    "installed_cli_validate": true,
+    "isolated_wheel_install": true,
+    "platform": "Linux x86-64",
+    "promoted_bundle_end_to_end": true,
+    "python": "3.13",
+    "tests_passed": 92,
+    "withdrawn_job_application_material_scan": "clean"
+  },
+  "release": "graph-native-model-mlx-v0.5.0"
+}

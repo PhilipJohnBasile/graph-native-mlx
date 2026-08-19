@@ -2,6 +2,20 @@
 
 A graph-controlled coding-agent runtime for Apple Silicon. It combines a resident MLX-LM language backbone with a validated workflow graph, hard transition masks, state-aware Qwen representations, durable checkpoints, isolated Git worktrees, transactional patch application, real verifier execution, and held-out graph optimization.
 
+
+## Project history and reproducibility archive
+
+This public repository preserves exact source snapshots from `v0.1.0` through `v0.5.6`.
+
+- [`docs/journey/`](docs/journey/) — chronological problem → fix → result record
+- [`docs/evidence/`](docs/evidence/) — sanitized M5 Max and bootstrap evidence
+- [`releases/`](releases/) — original source ZIPs, wheels, checksums, and release metadata
+- Git tags `v0.1.0` through `v0.5.6` — exact source tree for every release
+- [`PROVENANCE.md`](PROVENANCE.md) — inclusion, sanitization, and exclusion policy
+- [`PROJECT_STATUS.md`](PROJECT_STATUS.md) — proven results and the next scientific gate
+
+The active `main` branch is v0.5.6 plus archival documentation. No learned policy is activated yet; held-out policy evaluation is the next gate.
+
 The central rule is:
 
 > The graph is the control plane. A loop is only a named, bounded, observable back-edge.
@@ -223,7 +237,7 @@ The repository must be a clean Git top-level checkout. Worktree mode is the defa
 graph-model run \
   --provider mlx \
   --run-id fix-auth-regression-001 \
-  --repo /Users/pjb/git/my-project \
+  --repo $HOME/git/my-project \
   --task 'Fix the failing authentication regression. Preserve the public API, add focused tests, run verification, and report exact evidence.'
 ```
 
@@ -233,7 +247,7 @@ Explicit verifier commands can be supplied in order:
 graph-model run \
   --provider mlx \
   --run-id fix-auth-regression-002 \
-  --repo /Users/pjb/git/my-project \
+  --repo $HOME/git/my-project \
   --test-command 'python3 -m pytest -q' \
   --test-command 'python3 -m mypy src' \
   --task 'Fix the authentication regression and preserve typing guarantees.'
@@ -312,7 +326,7 @@ deterministic recovery reaches the exact token ceiling and emits a recognizable
 Create a JSONL manifest. Each line contains one repository task:
 
 ```json
-{"run_id":"project-fix-001","repo":"/Users/pjb/git/project","task":"Fix the failing parser regression and verify it.","test_commands":["python3 -m pytest -q"],"tags":["parser","repair"]}
+{"run_id":"project-fix-001","repo":"$HOME/git/project","task":"Fix the failing parser regression and verify it.","test_commands":["python3 -m pytest -q"],"tags":["parser","repair"]}
 ```
 
 Run the manifest with hidden capture enabled:
@@ -408,7 +422,7 @@ graph-model run \
   --graph .graph-model/graphs/coding-optimized-v1 \
   --provider mlx \
   --run-id optimized-graph-run-001 \
-  --repo /Users/pjb/git/my-project \
+  --repo $HOME/git/my-project \
   --task 'Fix the failing regression and provide exact verification evidence.'
 ```
 

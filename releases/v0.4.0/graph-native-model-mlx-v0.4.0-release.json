@@ -1,0 +1,22 @@
+{
+  "package": "graph-native-model",
+  "version": "0.4.0",
+  "source_zip": {
+    "name": "graph-native-model-mlx-v0.4.0.zip",
+    "sha256": "cf9dccb4e5cef243292ea7b298d5bf15eefee8dd3fd9075c12d687f5aac45ea2"
+  },
+  "wheel": {
+    "name": "graph_native_model-0.4.0-py3-none-any.whl",
+    "sha256": "8d65aca32e60de1527a51a88a9cda576bc500bff4231e767eedb8b9c24ab54a8"
+  },
+  "portable_tests": 84,
+  "graph": {
+    "name": "coding-supergraph",
+    "version": "0.3.0",
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "nodes": 12,
+    "edges": 19,
+    "terminals": 2
+  },
+  "hardware_validation": "required on Apple Silicon for actual MLX model load, selected-layer hidden extraction, and policy training"
+}

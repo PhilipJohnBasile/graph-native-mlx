@@ -7,3 +7,15 @@ build/
 dist/
 *.egg-info/
 .DS_Store
+
+# Public archive: never commit local runtime state or model material
+.graph-env
+*.sqlite3
+*.sqlite3-*
+*.db
+.cache/
+models/
+*.safetensors
+worktrees/
+qualification/
+training/

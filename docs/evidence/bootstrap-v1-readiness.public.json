@@ -1,0 +1,40 @@
+{
+  "format_version": 1,
+  "project_version": "0.5.6",
+  "hardware": "Apple M5 Max, 128 GB unified memory",
+  "model": "AutomatosX/AX-Qwen3.8-27B-MLX-AXQ-6bit-MTP",
+  "model_revision": "6a052d93a4618c8a559f402a16e8a190a48f209e",
+  "mlx": "0.32.1",
+  "mlx_lm": "0.31.3",
+  "graph": {
+    "name": "coding-supergraph",
+    "version": "0.3.0",
+    "nodes": 12,
+    "edges": 19,
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f"
+  },
+  "status_counts": {
+    "completed": 14,
+    "failed": 2,
+    "collector_error": 0
+  },
+  "policy_records": 165,
+  "decision_counts": {
+    "route": 16,
+    "transition": 149
+  },
+  "reward_counts": {
+    "1.0": 133,
+    "0.0": 32
+  },
+  "hidden_feature_sizes": [
+    256
+  ],
+  "raw_hidden_size": 5120,
+  "model_fingerprints": [
+    "16e1d71f453b0db739c663ca66b36f3fe39a53410be4e4d86ccf10a1fcc42ef8"
+  ],
+  "status_mismatches": [],
+  "policy_activated": false,
+  "provenance": "docs/journey/raw/2026-08-19-031638-v0.5.6-final-corpus.md"
+}

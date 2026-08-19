@@ -1,0 +1,31 @@
+{
+  "name": "graph-native-model",
+  "version": "0.5.3",
+  "release_date": "2026-08-18",
+  "graph": {
+    "name": "coding-supergraph",
+    "version": "0.3.0",
+    "schema_hash": "1536e86a64cbf09a1c0308ab72985a67eba47eb748f3b4f7ba23accc25e7543f",
+    "nodes": 12,
+    "edges": 19,
+    "terminals": ["abort", "finish"]
+  },
+  "changes": [
+    "Reward-weighted route, edge, and stop imitation: failed runs train value and cost but cannot teach failed actions.",
+    "Controlled 16-repository bootstrap corpus spanning fast, deep, repair, no-change, successful, and bounded-failure paths.",
+    "One-command Apple-Silicon bootstrap trace collection and hidden-feature export using a dedicated database without automatic policy activation."
+  ],
+  "portable_validation": {
+    "tests_passed": 101,
+    "python_compileall": true,
+    "graph_regeneration_exact": true,
+    "source_archive_retested": true,
+    "wheel_isolated_import": true,
+    "bootstrap_repositories_clean": true,
+    "bootstrap_route_and_baseline_contracts_checked": true
+  },
+  "hardware_validation": {
+    "v0.5.3_m5_run_performed": false,
+    "note": "The prior v0.5.2 model/Metal/hidden-state qualification passed on the user's M5 Max. v0.5.3 changes training semantics and corpus tooling; its in-place upgrade and bootstrap collection remain to be run on that hardware."
+  }
+}

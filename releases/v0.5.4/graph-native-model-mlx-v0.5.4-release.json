@@ -1,0 +1,20 @@
+{
+  "fixes": [
+    "preserve lexical venv Python path in bootstrap manifests",
+    "bounded strict-JSON recovery for MLX generation",
+    "safe Python-literal dict fallback",
+    "terminalize collector exceptions",
+    "per-task collection progress",
+    "bootstrap fail-fast and 4096 token cap"
+  ],
+  "portable_tests": 104,
+  "source_zip": {
+    "file": "graph-native-model-mlx-v0.5.4.zip",
+    "sha256": "db0b747d686c60e7f1010f02cadcf8710d4874830598de73397414174fd42d6c"
+  },
+  "version": "0.5.4",
+  "wheel": {
+    "file": "graph_native_model-0.5.4-py3-none-any.whl",
+    "sha256": "36f01ba5585d6da222cec847efd10193a2a93360e14191e55b071dec496d5fb1"
+  }
+}
