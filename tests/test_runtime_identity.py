@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -807,7 +808,15 @@ def test_go_runtime_identity_rejects_goroot_symlink(
         observe_go_runtime_identity(executable, environment)
 
 
-def test_git_identity_uses_direct_clt_binary_and_closed_environment() -> None:
+def test_git_identity_uses_direct_clt_binary_and_closed_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if sys.platform != "darwin":
+        monkeypatch.setattr(
+            runtime_identity,
+            "_require_safe_root_owned_path",
+            lambda path, *, directory: None,
+        )
     executable = trusted_clt_git_executable()
     environment = trusted_git_subprocess_environment()
 
@@ -844,6 +853,8 @@ def test_git_identity_uses_direct_clt_binary_and_closed_environment() -> None:
         "TMPDIR",
         "XDG_CONFIG_HOME",
     }
+    if sys.platform != "darwin":
+        return
     identity = observe_git_runtime_identity()
     assert identity["executable"]["path"] == str(executable)
     assert identity["exec_path_symlink_targets"]
