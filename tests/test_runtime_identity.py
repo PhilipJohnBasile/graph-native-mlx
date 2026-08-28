@@ -18,6 +18,7 @@ from graph_model.runtime_identity import (
     authenticate_python_runtime_identity,
     observe_go_runtime_identity,
     observe_git_runtime_identity,
+    observe_macho_runtime_closure,
     observe_python_runtime_identity,
     regular_file_identity,
     tree_manifest,
@@ -43,9 +44,15 @@ def _macho(
     *,
     rpaths: tuple[str, ...] = (),
     filetype: int = 2,
+    install_name: str | None = None,
 ) -> None:
     commands = [
         *(_macho_command(0x8000001C, value, dylib=False) for value in rpaths),
+        *(
+            [_macho_command(0xD, install_name, dylib=True)]
+            if install_name is not None
+            else []
+        ),
         *(_macho_command(0xC, value, dylib=True) for value in dependencies),
     ]
     header = struct.pack(
@@ -60,6 +67,114 @@ def _macho(
         0,
     )
     path.write_bytes(header + b"".join(commands))
+
+
+def test_macho_runtime_closure_is_root_relative_and_transitive(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    executable = root / "bin" / "runtime"
+    library = root / "lib" / "libprimary.dylib"
+    leaf = root / "lib" / "libleaf.dylib"
+    executable.parent.mkdir(parents=True)
+    library.parent.mkdir()
+    _macho(
+        executable,
+        ["@rpath/libprimary.dylib", "/usr/lib/libSystem.B.dylib"],
+        rpaths=("@executable_path/../lib",),
+    )
+    _macho(library, ["@loader_path/libleaf.dylib"], filetype=6)
+    _macho(leaf, [], filetype=6)
+
+    closure = observe_macho_runtime_closure(
+        executable,
+        required_binary_paths=(library,),
+        owned_native_roots=(root,),
+    )
+
+    assert {item["path"] for item in closure["files"]} == {
+        "root:0/bin/runtime",
+        "root:0/lib/libprimary.dylib",
+        "root:0/lib/libleaf.dylib",
+    }
+    assert closure["identity_sha256"]
+    assert "/usr/lib/libSystem.B.dylib" in closure["trusted_system_dependencies"]
+
+
+def test_macho_runtime_closure_resolves_explicit_preloads_by_install_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "snapshot"
+    executable = root / "runtime"
+    library = root / "lib" / "libprimary.dylib"
+    leaf = library.with_name("libleaf.dylib")
+    library.parent.mkdir(parents=True)
+    _macho(executable, [])
+    _macho(library, ["@rpath/libleaf.dylib"], filetype=6)
+    _macho(
+        leaf,
+        [],
+        filetype=6,
+        install_name="@rpath/libleaf.dylib",
+    )
+
+    closure = observe_macho_runtime_closure(
+        executable,
+        required_binary_paths=(library,),
+        preloaded_binary_paths=(leaf,),
+        owned_native_roots=(root,),
+    )
+
+    assert {item["path"] for item in closure["files"]} == {
+        "root:0/lib/libleaf.dylib",
+        "root:0/lib/libprimary.dylib",
+        "root:0/runtime",
+    }
+    assert closure["preloaded_images"] == [
+        {
+            "install_name": "@rpath/libleaf.dylib",
+            "path": "root:0/lib/libleaf.dylib",
+        }
+    ]
+
+
+def test_macho_runtime_closure_does_not_invent_an_rpath_fallback(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "snapshot"
+    executable = root / "runtime"
+    library = root / "lib" / "libprimary.dylib"
+    leaf = library.with_name("libleaf.dylib")
+    library.parent.mkdir(parents=True)
+    _macho(executable, [])
+    _macho(library, ["@rpath/libleaf.dylib"], filetype=6)
+    _macho(leaf, [], filetype=6, install_name="@rpath/libleaf.dylib")
+
+    with pytest.raises(
+        RuntimeIdentityError,
+        match="macho-dependency-unresolved:@rpath/libleaf.dylib",
+    ):
+        observe_macho_runtime_closure(
+            executable,
+            required_binary_paths=(library,),
+            owned_native_roots=(root,),
+        )
+
+
+def test_macho_runtime_closure_rejects_external_native_code(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    executable = root / "runtime"
+    external = tmp_path / "external.dylib"
+    root.mkdir()
+    _macho(executable, [str(external)])
+    _macho(external, [], filetype=6)
+
+    with pytest.raises(
+        RuntimeIdentityError,
+        match="macho-dependency-outside-trust-root",
+    ):
+        observe_macho_runtime_closure(
+            executable,
+            owned_native_roots=(root,),
+        )
 
 
 def test_tree_manifest_detects_byte_drift_and_rejects_symlink(tmp_path: Path) -> None:
@@ -130,9 +245,7 @@ def test_runtime_file_readers_fail_on_first_byte_after_opened_size(
 ) -> None:
     real_read = runtime_identity.os.read
 
-    def assert_post_open_growth_fails(
-        path: Path, observe: object
-    ) -> None:
+    def assert_post_open_growth_fails(path: Path, observe: object) -> None:
         did_grow = False
         requested: list[int] = []
 
@@ -179,9 +292,12 @@ def test_tree_manifest_rejects_one_byte_over_runtime_file_bound(
     root.mkdir()
     (root / "exact.bin").write_bytes(b"12345678")
     monkeypatch.setattr(runtime_identity, "_MAX_RUNTIME_FILE_BYTES", 8)
-    assert tree_manifest(root, reject_symlinks=True, require_root_owned=False)[
-        "file_count"
-    ] == 1
+    assert (
+        tree_manifest(root, reject_symlinks=True, require_root_owned=False)[
+            "file_count"
+        ]
+        == 1
+    )
     (root / "over.bin").write_bytes(b"123456789")
     with pytest.raises(RuntimeIdentityError, match="runtime-file-exceeds-reader-bound"):
         tree_manifest(root, reject_symlinks=True, require_root_owned=False)
@@ -446,9 +562,7 @@ def test_python_runtime_identity_binds_exact_native_input_file_metadata(
         additional_binary_paths=[frozen],
     )
     frozen_input = next(
-        item
-        for item in identity["native_input_files"]
-        if item["path"] == str(frozen)
+        item for item in identity["native_input_files"] if item["path"] == str(frozen)
     )
     assert frozen_input["links"] == 1
     assert {
@@ -560,9 +674,7 @@ def test_python_runtime_identity_uses_finite_semantic_contexts_not_ancestry(
         additional_binary_paths=[root],
     )
 
-    assert str(redirected_child) in {
-        item["path"] for item in identity["native_files"]
-    }
+    assert str(redirected_child) in {item["path"] for item in identity["native_files"]}
 
 
 def test_owned_native_roots_do_not_expand_python_prefix_admission(

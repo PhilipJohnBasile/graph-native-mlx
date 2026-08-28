@@ -1,0 +1,470 @@
+"""Authenticated capability bridge for the MLXcelerator Rust runtime."""
+
+from __future__ import annotations
+
+import math
+import os
+import selectors
+import signal
+import shutil
+import stat
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+from graph_model.runtime_identity import (
+    canonical_sha256,
+    observe_macho_runtime_closure,
+    regular_file_identity,
+    tree_manifest,
+)
+
+
+MLXCELERATOR_RUNTIME_PROBE_FORMAT = "graph-native-mlxcelerator-runtime-probe-v1"
+_MAX_PROBE_OUTPUT_BYTES = 64 * 1024
+_REQUIRED_KEYS = frozenset(
+    {
+        "runtime",
+        "chip",
+        "model",
+        "memory_bytes",
+        "os_version",
+        "os_build",
+        "admitted",
+        "admission_reason",
+        "mlx_version",
+        "mlx_gpu_smoke",
+        "mlx_gpu_smoke_error",
+        "core_ai_architecture",
+        "core_ai_units",
+        "nax_gpu_path",
+        "lane_gpu",
+        "lane_cpu",
+        "lane_ane",
+    }
+)
+_LANE_STATES = frozenset({"QualifiedOnly", "Unavailable"})
+_ADMISSION_REASONS = frozenset(
+    {"qualified", "non_apple_silicon", "below_m5_max_floor", "unknown_hardware"}
+)
+_U64_MAX = (1 << 64) - 1
+
+
+class MlxceleratorRuntimeError(RuntimeError):
+    """The native runtime probe failed its identity or capability contract."""
+
+
+def probe_mlxcelerator_runtime(
+    executable: str | Path,
+    mlx_c_library: str | Path,
+    *,
+    expected_executable_sha256: str,
+    expected_library_manifest_sha256: str,
+    expected_mlx_c_sha256: str,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Run an exact MLXcelerator binary and return authenticated capabilities.
+
+    Source artifacts are authenticated, copied into a private per-probe
+    snapshot, authenticated again, and executed from that snapshot. The local
+    account remains inside the trust boundary, as it does for the rest of
+    Graph-Native's user-owned runtime identities.
+    """
+
+    _validate_timeout(timeout_seconds)
+    executable_path = _require_executable(Path(executable))
+    mlx_c_path = _require_regular_file(Path(mlx_c_library), "mlx-c-library")
+    mlx_library_root = mlx_c_path.parent
+
+    executable_before = regular_file_identity(executable_path)
+    mlx_c_before = regular_file_identity(mlx_c_path)
+    library_before = _library_manifest(mlx_library_root)
+    if executable_before["sha256"] != expected_executable_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-executable-unauthorized")
+    if library_before["manifest_sha256"] != expected_library_manifest_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-library-unauthorized")
+    if mlx_c_before["sha256"] != expected_mlx_c_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-mlx-c-unauthorized")
+    with tempfile.TemporaryDirectory(prefix="graph-mlxcelerator-probe-") as temporary:
+        snapshot_root = Path(temporary)
+        snapshot_executable = snapshot_root / "mlxcelerator"
+        snapshot_library_root = snapshot_root / "mlx"
+        try:
+            shutil.copy2(executable_path, snapshot_executable, follow_symlinks=False)
+            shutil.copytree(
+                mlx_library_root,
+                snapshot_library_root,
+                symlinks=True,
+                copy_function=shutil.copy2,
+            )
+        except OSError as exc:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-runtime-snapshot-failed"
+            ) from exc
+
+        snapshot_executable_identity = regular_file_identity(snapshot_executable)
+        snapshot_library = _library_manifest(snapshot_library_root)
+        if snapshot_executable_identity["sha256"] != executable_before["sha256"]:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-runtime-snapshot-executable-drift"
+            )
+        if not _same_tree_content(library_before, snapshot_library):
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-runtime-snapshot-library-drift"
+            )
+
+        snapshot_mlx_c = snapshot_library_root / mlx_c_path.name
+        if regular_file_identity(snapshot_mlx_c)["sha256"] != mlx_c_before["sha256"]:
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-snapshot-mlx-c-drift")
+        snapshot_preloads = tuple(
+            candidate
+            for name in ("libjaccl.dylib", "libmlx.dylib")
+            if (candidate := snapshot_library_root / name).is_file()
+        )
+        native_closure = observe_macho_runtime_closure(
+            snapshot_executable,
+            required_binary_paths=(snapshot_mlx_c,),
+            preloaded_binary_paths=snapshot_preloads,
+            owned_native_roots=(snapshot_root,),
+        )
+        returncode, stdout, stderr = _run_probe_bounded(
+            [str(snapshot_executable), "probe", str(snapshot_mlx_c)],
+            cwd=snapshot_root,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+            },
+            timeout=timeout_seconds,
+        )
+
+        if regular_file_identity(snapshot_executable) != snapshot_executable_identity:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-runtime-snapshot-executable-drift"
+            )
+        if _library_manifest(snapshot_library_root) != snapshot_library:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-runtime-snapshot-library-drift"
+            )
+        if (
+            observe_macho_runtime_closure(
+                snapshot_executable,
+                required_binary_paths=(snapshot_mlx_c,),
+                preloaded_binary_paths=snapshot_preloads,
+                owned_native_roots=(snapshot_root,),
+            )
+            != native_closure
+        ):
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-native-closure-drift")
+
+    if returncode != 0:
+        raise MlxceleratorRuntimeError(f"mlxcelerator-runtime-probe-exit:{returncode}")
+
+    executable_after = regular_file_identity(executable_path)
+    mlx_c_after = regular_file_identity(mlx_c_path)
+    library_after = _library_manifest(mlx_library_root)
+    if executable_before != executable_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-executable-drift")
+    if library_before != library_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-library-drift")
+    if mlx_c_before != mlx_c_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-mlx-c-drift")
+
+    try:
+        output = stdout.decode("utf-8", errors="strict")
+        stderr.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-not-utf8") from exc
+    capabilities = _parse_probe_output(output)
+    receipt = {
+        "format": MLXCELERATOR_RUNTIME_PROBE_FORMAT,
+        "executable": executable_before,
+        "mlx_c_library": {
+            "relative_path": mlx_c_path.name,
+            "identity": mlx_c_before,
+        },
+        "mlx_library_manifest": library_before,
+        "native_closure": native_closure,
+        "capabilities": capabilities,
+    }
+    receipt["receipt_sha256"] = canonical_sha256(receipt)
+    return receipt
+
+
+def _run_probe_bounded(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+) -> tuple[int, bytes, bytes]:
+    _validate_timeout(timeout)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-failed") from exc
+    selector: selectors.BaseSelector | None = None
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + timeout
+    try:
+        if process.stdout is None or process.stderr is None:
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-pipe-failed")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-timeout")
+            for key, _mask in selector.select(min(remaining, 0.1)):
+                chunk = os.read(key.fd, 64 * 1024)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffer = buffers[key.data]
+                buffer.extend(chunk)
+                if len(buffer) > _MAX_PROBE_OUTPUT_BYTES:
+                    raise MlxceleratorRuntimeError(
+                        "mlxcelerator-runtime-probe-output-exceeded"
+                    )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-timeout")
+        returncode = process.wait(timeout=remaining)
+        if _kill_process_group(process):
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-runtime-probe-descendant-process"
+            )
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group(process)
+        process.wait()
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-timeout") from exc
+    except MlxceleratorRuntimeError:
+        _kill_process_group(process)
+        process.wait()
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        _kill_process_group(process)
+        process.wait()
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-failed") from exc
+    finally:
+        if selector is not None:
+            selector.close()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
+
+
+def _validate_timeout(timeout: float) -> None:
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-timeout-invalid")
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> bool:
+    """Kill any process still in the probe's isolated process group.
+
+    Returns whether the group still existed. Once the direct child has been
+    reaped, a surviving group means the probe detached a descendant.
+    """
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        return True
+    return True
+
+
+def _library_manifest(root: Path) -> dict[str, Any]:
+    return tree_manifest(
+        root,
+        reject_symlinks=True,
+        require_root_owned=False,
+    )
+
+
+def _same_tree_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return all(
+        left[field] == right[field]
+        for field in ("entries", "file_count", "total_bytes")
+    )
+
+
+def _require_executable(path: Path) -> Path:
+    resolved = _require_regular_file(path, "executable")
+    if not resolved.stat().st_mode & stat.S_IXUSR:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-not-executable")
+    return resolved
+
+
+def _require_regular_file(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        raise MlxceleratorRuntimeError(f"mlxcelerator-runtime-{label}-not-absolute")
+    absolute = path.absolute()
+    _reject_symlinked_components(absolute, label)
+    try:
+        metadata = absolute.lstat()
+    except OSError as exc:
+        raise MlxceleratorRuntimeError(
+            f"mlxcelerator-runtime-{label}-unavailable"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise MlxceleratorRuntimeError(f"mlxcelerator-runtime-{label}-invalid")
+    return absolute
+
+
+def _reject_symlinked_components(path: Path, label: str) -> None:
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-runtime-{label}-unavailable"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-runtime-{label}-symlink-component"
+            )
+
+
+def _parse_probe_output(output: str) -> dict[str, Any]:
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        if not line or "=" not in line:
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-probe-line-invalid")
+        key, value = line.split("=", 1)
+        if key not in _REQUIRED_KEYS:
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-runtime-probe-key-unknown:{key}"
+            )
+        if key in values:
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-runtime-probe-key-duplicate:{key}"
+            )
+        values[key] = value
+    missing = sorted(_REQUIRED_KEYS - values.keys())
+    if missing:
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-runtime-probe-key-missing:" + ",".join(missing)
+        )
+
+    admitted = _parse_bool(values["admitted"], "admitted")
+    mlx_gpu_smoke = _parse_bool(values["mlx_gpu_smoke"], "mlx_gpu_smoke")
+    nax_gpu_path = _parse_bool(values["nax_gpu_path"], "nax_gpu_path")
+    if values["admission_reason"] not in _ADMISSION_REASONS:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-admission-reason-invalid")
+    if admitted != (values["admission_reason"] == "qualified"):
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-admission-inconsistent")
+    if mlx_gpu_smoke != (values["mlx_gpu_smoke_error"] == "none"):
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-gpu-smoke-inconsistent")
+    if not mlx_gpu_smoke and not values["mlx_gpu_smoke_error"]:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-gpu-smoke-inconsistent")
+    for key in ("lane_gpu", "lane_cpu", "lane_ane"):
+        if values[key] not in _LANE_STATES:
+            raise MlxceleratorRuntimeError(f"mlxcelerator-runtime-lane-invalid:{key}")
+    try:
+        memory_bytes = int(values["memory_bytes"])
+    except ValueError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-memory-invalid") from exc
+    if not 0 < memory_bytes <= _U64_MAX:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-memory-invalid")
+    if not values["runtime"].startswith("mlxcelerator-mlx-runtime/"):
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-identity-invalid")
+    if not values["mlx_version"] or values["mlx_version"] == "not_probed":
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-mlx-unprobed")
+    for key in ("model", "os_version", "os_build"):
+        if not values[key]:
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-runtime-capability-empty:{key}"
+            )
+    core_ai_units = (
+        values["core_ai_units"].split(",") if values["core_ai_units"] else []
+    )
+    if len(core_ai_units) != len(set(core_ai_units)) or not set(core_ai_units) <= {
+        "cpu",
+        "gpu",
+        "ane",
+    }:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-core-ai-units-invalid")
+    canonical_core_ai_units = [
+        unit for unit in ("cpu", "gpu", "ane") if unit in core_ai_units
+    ]
+    if core_ai_units != canonical_core_ai_units:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-core-ai-units-invalid")
+    if not values["core_ai_architecture"] or (
+        values["core_ai_architecture"] == "not_available"
+    ) == bool(core_ai_units):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-runtime-core-ai-architecture-inconsistent"
+        )
+    expected_gpu_lane = (
+        "QualifiedOnly"
+        if admitted and (mlx_gpu_smoke or "gpu" in core_ai_units)
+        else "Unavailable"
+    )
+    expected_cpu_lane = "QualifiedOnly" if admitted else "Unavailable"
+    expected_ane_lane = (
+        "QualifiedOnly" if admitted and "ane" in core_ai_units else "Unavailable"
+    )
+    if values["lane_gpu"] != expected_gpu_lane:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-gpu-lane-inconsistent")
+    if values["lane_cpu"] != expected_cpu_lane:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-cpu-lane-inconsistent")
+    if values["lane_ane"] != expected_ane_lane:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-ane-lane-inconsistent")
+    if nax_gpu_path:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-nax-unimplemented")
+
+    return {
+        "runtime_identity": values["runtime"],
+        "chip": values["chip"],
+        "model": values["model"],
+        "memory_bytes": memory_bytes,
+        "os_version": values["os_version"],
+        "os_build": values["os_build"],
+        "admitted": admitted,
+        "admission_reason": values["admission_reason"],
+        "mlx_version": values["mlx_version"],
+        "mlx_gpu_smoke": mlx_gpu_smoke,
+        "mlx_gpu_smoke_error": values["mlx_gpu_smoke_error"],
+        "core_ai_architecture": values["core_ai_architecture"],
+        "core_ai_units": core_ai_units,
+        "nax_gpu_path": nax_gpu_path,
+        "lanes": {
+            "gpu": values["lane_gpu"],
+            "cpu": values["lane_cpu"],
+            "ane": values["lane_ane"],
+        },
+    }
+
+
+def _parse_bool(value: str, label: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise MlxceleratorRuntimeError(f"mlxcelerator-runtime-boolean-invalid:{label}")

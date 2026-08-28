@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping, Sequence
 GIT_RUNTIME_IDENTITY_FORMAT = "graph-native-git-runtime-identity-v1"
 GO_RUNTIME_IDENTITY_FORMAT = "graph-native-go-runtime-identity-v1"
 PYTHON_RUNTIME_IDENTITY_FORMAT = "graph-native-python-runtime-identity-v1"
+MACHO_RUNTIME_CLOSURE_FORMAT = "graph-native-macho-runtime-closure-v1"
 TREE_MANIFEST_FORMAT = "graph-native-runtime-tree-manifest-v1"
 
 CLT_GIT_EXECUTABLE = Path("/Library/Developer/CommandLineTools/usr/bin/git")
@@ -200,8 +201,7 @@ def _read_stable_regular_file(
         raise RuntimeIdentityError(f"runtime-file-replaced:{target}") from exc
     if not (
         bytes_read == opened.st_size
-        and
-        _stable_metadata(before)
+        and _stable_metadata(before)
         == _stable_metadata(opened)
         == _stable_metadata(after_read)
         == _stable_metadata(after_path)
@@ -656,6 +656,7 @@ _FAT_MAGICS = {
     b"\xbf\xba\xfe\xca": ("<", True),
 }
 _DYLIB_COMMANDS = {0xC, 0x18, 0x1F, 0x23, 0x20}
+_LC_ID_DYLIB = 0xD
 _LC_RPATH = 0x1C
 _LC_REQ_DYLD = 0x80000000
 _MH_EXECUTE = 0x2
@@ -690,7 +691,7 @@ def _macho_slices(data: bytes) -> list[bytes]:
 
 def _read_macho_paths(
     path: Path,
-) -> tuple[list[str], list[str], dict[str, Any], bool, bool]:
+) -> tuple[list[str], list[str], dict[str, Any], bool, bool, list[str]]:
     # Most frozen distribution payloads are not Mach-O binaries (notably MLX
     # metallib files). Stream and hash those under the runtime bound while
     # retaining only their magic, rather than materializing them in memory.
@@ -700,18 +701,20 @@ def _read_macho_paths(
         *_MACHO_64_MAGICS,
         *_FAT_MAGICS,
     }:
-        return [], [], probe_identity, False, False
+        return [], [], probe_identity, False, False, []
     data, identity = _read_stable_regular_file(path)
     if identity != probe_identity:
         raise RuntimeIdentityError(f"runtime-file-replaced:{path}")
     slices = _macho_slices(data)
     dependencies: list[str] = []
     rpaths: list[str] = []
+    install_names: list[str] = []
     is_entry_image = False
 
     def append_once(values: list[str], item: str) -> None:
         if item not in values:
             values.append(item)
+
     for image in slices:
         magic = image[:4]
         if magic in _MACHO_64_MAGICS:
@@ -739,7 +742,11 @@ def _read_macho_paths(
             if command_size < 8 or cursor + command_size > end:
                 raise RuntimeIdentityError("macho-load-command-invalid")
             base_command = command & ~_LC_REQ_DYLD
-            if base_command in _DYLIB_COMMANDS or base_command == _LC_RPATH:
+            if (
+                base_command in _DYLIB_COMMANDS
+                or base_command == _LC_ID_DYLIB
+                or base_command == _LC_RPATH
+            ):
                 if command_size < 12:
                     raise RuntimeIdentityError("macho-string-command-invalid")
                 string_offset = struct.unpack_from(f"{endian}I", image, cursor + 8)[0]
@@ -753,10 +760,12 @@ def _read_macho_paths(
                     raise RuntimeIdentityError("macho-path-not-utf8") from exc
                 if base_command == _LC_RPATH:
                     append_once(rpaths, value)
+                elif base_command == _LC_ID_DYLIB:
+                    append_once(install_names, value)
                 elif value:
                     append_once(dependencies, value)
             cursor += command_size
-    return dependencies, rpaths, identity, bool(slices), is_entry_image
+    return dependencies, rpaths, identity, bool(slices), is_entry_image, install_names
 
 
 def _is_trusted_os_dependency(path: Path) -> bool:
@@ -863,6 +872,175 @@ def _stdlib_root() -> Path:
     return Path(value)
 
 
+def observe_macho_runtime_closure(
+    executable: str | Path,
+    *,
+    required_binary_paths: Iterable[str | Path] = (),
+    preloaded_binary_paths: Iterable[str | Path] = (),
+    owned_native_roots: Iterable[str | Path],
+) -> dict[str, Any]:
+    """Close and content-bind a required Mach-O dependency graph.
+
+    Every non-system dependency must resolve beneath one supplied owned root.
+    Paths in the returned identity are root-relative so a private snapshot can
+    produce a stable receipt independent of its temporary directory name.
+    """
+
+    roots = tuple(
+        sorted(
+            {Path(root).absolute().resolve(strict=True) for root in owned_native_roots},
+            key=str,
+        )
+    )
+    if not roots:
+        raise RuntimeIdentityError("macho-owned-root-required")
+
+    def required_file(value: str | Path) -> Path:
+        supplied = Path(value).absolute()
+        try:
+            metadata = supplied.lstat()
+        except OSError as exc:
+            raise RuntimeIdentityError("macho-input-unavailable") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeIdentityError("macho-input-symlink")
+        try:
+            resolved = supplied.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeIdentityError("macho-input-unavailable") from exc
+        if not any(_path_is_beneath(resolved, root) for root in roots):
+            raise RuntimeIdentityError("macho-input-outside-trust-root")
+        return resolved
+
+    executable_path = required_file(executable)
+    preload_paths = {required_file(path) for path in preloaded_binary_paths}
+    required_paths = {
+        executable_path,
+        *(required_file(path) for path in required_binary_paths),
+        *preload_paths,
+    }
+    initial_observations = {
+        path: _read_macho_paths(path) for path in sorted(required_paths, key=str)
+    }
+    observed_files: dict[Path, dict[str, Any]] = {
+        path: observation[2] for path, observation in initial_observations.items()
+    }
+    preloaded_by_install_name: dict[str, Path] = {}
+    for path in sorted(preload_paths, key=str):
+        install_names = initial_observations[path][5]
+        if len(install_names) != 1:
+            raise RuntimeIdentityError("macho-preload-install-name-invalid")
+        install_name = install_names[0]
+        prior = preloaded_by_install_name.setdefault(install_name, path)
+        if prior != path:
+            raise RuntimeIdentityError("macho-preload-install-name-collision")
+    pending: deque[tuple[Path, tuple[Path, ...]]] = deque(
+        (path, ()) for path in sorted(required_paths, key=str)
+    )
+    visited: set[tuple[Path, tuple[Path, ...]]] = set()
+    edges: set[tuple[Path, str, Path]] = set()
+    trusted_system: set[str] = set()
+    while pending:
+        loader, inherited_rpaths = pending.popleft()
+        context = (loader, inherited_rpaths)
+        if context in visited:
+            continue
+        if len(visited) >= _MAX_MACHO_RESOLUTION_CONTEXTS:
+            raise RuntimeIdentityError("macho-resolution-context-limit")
+        visited.add(context)
+        dependencies, rpaths, loader_identity, _, _, _ = _read_macho_paths(loader)
+        prior_identity = observed_files.get(loader)
+        if prior_identity is not None and prior_identity != loader_identity:
+            raise RuntimeIdentityError("macho-runtime-mutated-during-observation")
+        observed_files[loader] = loader_identity
+        effective_rpaths = _dedupe_macho_rpaths(
+            (
+                *_resolved_macho_rpaths(
+                    rpaths,
+                    loader=loader,
+                    executable=executable_path,
+                ),
+                *inherited_rpaths,
+            )
+        )
+        for dependency in dependencies:
+            if dependency.startswith("/"):
+                declared_absolute = Path(os.path.normpath(dependency))
+                if _is_trusted_os_dependency(declared_absolute):
+                    edges.add((loader, dependency, declared_absolute))
+                    trusted_system.add(str(declared_absolute))
+                    continue
+            resolved = preloaded_by_install_name.get(dependency)
+            if resolved is None:
+                resolved = _resolve_macho_dependency(
+                    dependency,
+                    loader=loader,
+                    executable=executable_path,
+                    rpaths=effective_rpaths,
+                    owned_roots=roots,
+                )
+            edges.add((loader, dependency, resolved))
+            if _is_trusted_os_dependency(resolved):
+                trusted_system.add(str(resolved))
+                continue
+            if not any(_path_is_beneath(resolved, root) for root in roots):
+                raise RuntimeIdentityError("macho-dependency-outside-trust-root")
+            pending.append((resolved, effective_rpaths))
+
+    if any(
+        regular_file_identity(path) != identity
+        for path, identity in observed_files.items()
+    ):
+        raise RuntimeIdentityError("macho-runtime-mutated-during-observation")
+
+    def normalized_path(path: Path) -> str:
+        if _is_trusted_os_dependency(path):
+            return f"system:{path}"
+        for index, root in enumerate(roots):
+            if _path_is_beneath(path, root):
+                relative = path.relative_to(root).as_posix()
+                return f"root:{index}/{relative}"
+        raise RuntimeIdentityError("macho-dependency-outside-trust-root")
+
+    files = [
+        {
+            "path": normalized_path(path),
+            "bytes": identity["bytes"],
+            "sha256": identity["sha256"],
+        }
+        for path, identity in sorted(
+            observed_files.items(), key=lambda item: str(item[0])
+        )
+    ]
+    payload = {
+        "format": MACHO_RUNTIME_CLOSURE_FORMAT,
+        "executable": normalized_path(executable_path),
+        "required_inputs": [
+            normalized_path(path) for path in sorted(required_paths, key=str)
+        ],
+        "preloaded_images": [
+            {"install_name": install_name, "path": normalized_path(path)}
+            for install_name, path in sorted(preloaded_by_install_name.items())
+        ],
+        "files": sorted(files, key=lambda item: item["path"]),
+        "edges": [
+            {
+                "loader": normalized_path(loader),
+                "declared": declared,
+                "resolved": normalized_path(resolved),
+            }
+            for loader, declared, resolved in sorted(
+                edges,
+                key=lambda item: (str(item[0]), item[1], str(item[2])),
+            )
+        ],
+        "trusted_system_dependencies": sorted(trusted_system),
+        "trusted_system_prefixes": [
+            str(path) for path in TRUSTED_OS_DEPENDENCY_PREFIXES
+        ],
+    }
+    return {**payload, "identity_sha256": canonical_sha256(payload)}
+
+
 def observe_python_runtime_identity(
     *,
     executable: str | Path = sys.executable,
@@ -953,8 +1131,7 @@ def observe_python_runtime_identity(
         path for path, observation in initial_observations.items() if observation[4]
     }
     pending: deque[tuple[Path, tuple[Path, ...], bool]] = deque(
-        (path, (), path in entry_image_roots)
-        for path in sorted(initial_paths, key=str)
+        (path, (), path in entry_image_roots) for path in sorted(initial_paths, key=str)
     )
     # Resolution depends only on the loader, its ordered inherited LC_RPATH
     # frame, and whether that loader is required.  This finite semantic graph
@@ -978,6 +1155,7 @@ def observe_python_runtime_identity(
             rpaths,
             loader_identity,
             is_macho,
+            _,
             _,
         ) = _read_macho_paths(loader)
         prior_identity = observed_files.get(loader)
@@ -1004,9 +1182,7 @@ def observe_python_runtime_identity(
             if dependency.startswith("/"):
                 declared_absolute = Path(os.path.normpath(dependency))
                 if _is_trusted_os_dependency(declared_absolute):
-                    native_edges.add(
-                        (str(loader), dependency, str(declared_absolute))
-                    )
+                    native_edges.add((str(loader), dependency, str(declared_absolute)))
                     trusted_system.add(str(declared_absolute))
                     continue
             try:
