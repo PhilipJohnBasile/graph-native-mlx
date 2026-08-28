@@ -107,6 +107,19 @@ def _llama_script(tmp_path: Path, output: str) -> Path:
     return executable
 
 
+def _sdpa_llama_script(tmp_path: Path, output: str) -> Path:
+    executable = tmp_path / "mlxcelerator"
+    escaped = output.replace("'", "'\"'\"'")
+    executable.write_text(
+        f"#!/bin/sh\n"
+        f"if [ \"$MLXC_USE_SDPA\" != \"1\" ]; then exit 91; fi\n"
+        f"printf '%s' '{escaped}'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
 def test_llama_admission_authenticates_model_and_configuration(
     tmp_path: Path,
 ) -> None:
@@ -222,6 +235,100 @@ def test_llama_generation_authenticates_native_backend_and_output(
     )["sha256"]
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     assert receipt["receipt_sha256"] == canonical_sha256(unsigned)
+
+
+def test_llama_generation_sdpa_requires_and_passes_explicit_mode_evidence(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-sdpa-host-kv-v1",
+            "attention_mode": "sdpa",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _sdpa_llama_script(tmp_path, output)
+
+    receipt = generate_mlxcelerator_llama_text(
+        executable,
+        model,
+        library,
+        "hello",
+        2,
+        expected_executable_sha256=regular_file_identity(executable)["sha256"],
+        expected_model_sha256=model_identity["sha256"],
+        expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+        expected_library_manifest_sha256=tree_manifest(
+            library.parent,
+            reject_symlinks=True,
+            require_root_owned=False,
+        )["manifest_sha256"],
+        attention_mode="sdpa",
+    )
+
+    assert receipt["generation"]["attention_mode"] == "sdpa"
+    assert receipt["generation"]["backend"] == "mlx-gpu-linear-sdpa-host-kv-v1"
+
+
+def test_llama_generation_sdpa_rejects_host_backend_evidence(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-host-attention-v1",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _llama_script(tmp_path, output)
+
+    with pytest.raises(
+        MlxceleratorRuntimeError,
+        match="mlxcelerator-llama-generation-schema-invalid",
+    ):
+        generate_mlxcelerator_llama_text(
+            executable,
+            model,
+            library,
+            "hello",
+            2,
+            expected_executable_sha256=regular_file_identity(executable)["sha256"],
+            expected_model_sha256=model_identity["sha256"],
+            expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+            expected_library_manifest_sha256=tree_manifest(
+                library.parent,
+                reject_symlinks=True,
+                require_root_owned=False,
+            )["manifest_sha256"],
+            attention_mode="sdpa",
+        )
 
 
 def test_model_identity_streams_past_native_library_cap(tmp_path: Path) -> None:

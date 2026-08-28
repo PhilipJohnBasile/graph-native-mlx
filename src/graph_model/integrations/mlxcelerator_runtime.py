@@ -85,6 +85,12 @@ _LLAMA_GENERATION_REQUIRED_KEYS = frozenset(
         "generated_text",
     }
 )
+_LLAMA_GENERATION_SDPA_REQUIRED_KEYS = _LLAMA_GENERATION_REQUIRED_KEYS | {
+    "attention_mode",
+}
+_LLAMA_GENERATION_HOST_BACKEND = "mlx-gpu-linear-host-attention-v1"
+_LLAMA_GENERATION_SDPA_BACKEND = "mlx-gpu-linear-sdpa-host-kv-v1"
+_LLAMA_ATTENTION_MODES = frozenset({"host", "sdpa"})
 
 
 class MlxceleratorRuntimeError(RuntimeError):
@@ -323,6 +329,7 @@ def generate_mlxcelerator_llama_text(
     expected_model_sha256: str,
     expected_library_manifest_sha256: str,
     expected_mlx_c_sha256: str,
+    attention_mode: str = "host",
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Authenticate and run the native MLX Llama generation command.
@@ -330,10 +337,20 @@ def generate_mlxcelerator_llama_text(
     The executable, model, and complete MLX library directory are copied into
     a private snapshot before execution. The returned receipt binds the exact
     content identities, native Mach-O closure, prompt, token budget, backend,
-    and generated text.
+    and generated text. ``attention_mode="sdpa"`` opt-in passes
+    ``MLXC_USE_SDPA=1`` and requires the runtime to report the distinct SDPA
+    backend and mode in its output. It therefore fails closed against an older
+    binary that silently ignores the request.
     """
 
     _validate_timeout(timeout_seconds)
+    if (
+        not isinstance(attention_mode, str)
+        or attention_mode not in _LLAMA_ATTENTION_MODES
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-attention-mode-invalid"
+        )
     if (
         isinstance(max_new_tokens, bool)
         or not isinstance(max_new_tokens, int)
@@ -409,6 +426,16 @@ def generate_mlxcelerator_llama_text(
             preloaded_binary_paths=snapshot_preloads,
             owned_native_roots=(snapshot_root,),
         )
+        runtime_env = {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+        if attention_mode == "sdpa":
+            # This is opt-in because the current decoder still stages KV on
+            # the host. The receipt parser below requires explicit mode
+            # evidence from the runtime before admitting the result.
+            runtime_env["MLXC_USE_SDPA"] = "1"
         returncode, stdout, stderr = _run_probe_bounded(
             [
                 str(snapshot_executable),
@@ -419,11 +446,7 @@ def generate_mlxcelerator_llama_text(
                 prompt,
             ],
             cwd=snapshot_root,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "LANG": "C",
-                "LC_ALL": "C",
-            },
+            env=runtime_env,
             timeout=timeout_seconds,
         )
         if regular_file_identity(snapshot_executable) != snapshot_executable_identity:
@@ -467,6 +490,7 @@ def generate_mlxcelerator_llama_text(
         model_before,
         prompt,
         max_new_tokens,
+        attention_mode,
     )
     executable_after = regular_file_identity(executable_path)
     model_after = _model_file_identity(model_path)
@@ -921,6 +945,7 @@ def _parse_llama_generation_output(
     model_identity: dict[str, Any],
     prompt: str,
     max_new_tokens: int,
+    attention_mode: str = "host",
 ) -> dict[str, Any]:
     try:
         value = json.loads(output)
@@ -928,7 +953,12 @@ def _parse_llama_generation_output(
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-json-invalid"
         ) from exc
-    if not isinstance(value, dict) or set(value) != _LLAMA_GENERATION_REQUIRED_KEYS:
+    required_keys = (
+        _LLAMA_GENERATION_SDPA_REQUIRED_KEYS
+        if attention_mode == "sdpa"
+        else _LLAMA_GENERATION_REQUIRED_KEYS
+    )
+    if not isinstance(value, dict) or set(value) != required_keys:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-schema-invalid")
     if (
         isinstance(value["schema_version"], bool)
@@ -938,8 +968,17 @@ def _parse_llama_generation_output(
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-schema-version-invalid"
         )
-    if value["backend"] != "mlx-gpu-linear-host-attention-v1":
+    expected_backend = (
+        _LLAMA_GENERATION_SDPA_BACKEND
+        if attention_mode == "sdpa"
+        else _LLAMA_GENERATION_HOST_BACKEND
+    )
+    if value["backend"] != expected_backend:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-backend-invalid")
+    if attention_mode == "sdpa" and value["attention_mode"] != "sdpa":
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-attention-mode-mismatch"
+        )
     if not isinstance(value["path"], str) or not value["path"]:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-path-invalid")
     if (
@@ -965,7 +1004,7 @@ def _parse_llama_generation_output(
         )
     if not isinstance(value["generated_text"], str):
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-text-invalid")
-    return {
+    generation = {
         "schema_version": 1,
         "backend": value["backend"],
         "path": value["path"],
@@ -975,6 +1014,9 @@ def _parse_llama_generation_output(
         "max_new_tokens": value["max_new_tokens"],
         "generated_text": value["generated_text"],
     }
+    if attention_mode == "sdpa":
+        generation["attention_mode"] = value["attention_mode"]
+    return generation
 
 
 def _parse_bool(value: str, label: str) -> bool:
