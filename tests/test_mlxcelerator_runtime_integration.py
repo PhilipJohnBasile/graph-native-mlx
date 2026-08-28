@@ -8,10 +8,12 @@ import pytest
 
 from graph_model.integrations.mlxcelerator_runtime import (
     MLXCELERATOR_LLAMA_ADMISSION_FORMAT,
+    MLXCELERATOR_LLAMA_GENERATION_FORMAT,
     MLXCELERATOR_RUNTIME_PROBE_FORMAT,
     MlxceleratorRuntimeError,
     _model_file_identity,
     admit_mlxcelerator_llama_model,
+    generate_mlxcelerator_llama_text,
     probe_mlxcelerator_runtime,
 )
 from graph_model.runtime_identity import (
@@ -162,6 +164,64 @@ def test_llama_admission_rejects_digest_mismatch(tmp_path: Path) -> None:
             expected_executable_sha256=regular_file_identity(executable)["sha256"],
             expected_model_sha256="0" * 64,
         )
+
+
+def test_llama_generation_authenticates_native_backend_and_output(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-host-attention-v1",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _llama_script(tmp_path, output)
+    receipt = generate_mlxcelerator_llama_text(
+        executable,
+        model,
+        library,
+        "hello",
+        2,
+        expected_executable_sha256=regular_file_identity(executable)["sha256"],
+        expected_model_sha256=model_identity["sha256"],
+        expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+        expected_library_manifest_sha256=tree_manifest(
+            library.parent,
+            reject_symlinks=True,
+            require_root_owned=False,
+        )["manifest_sha256"],
+    )
+
+    assert receipt["format"] == MLXCELERATOR_LLAMA_GENERATION_FORMAT
+    assert receipt["generation"] == {
+        "schema_version": 1,
+        "backend": "mlx-gpu-linear-host-attention-v1",
+        "path": "/snapshot/model.gguf",
+        "file_size": model_identity["bytes"],
+        "digest_sha256": model_identity["sha256"],
+        "prompt": "hello",
+        "max_new_tokens": 2,
+        "generated_text": "ok",
+    }
+    assert receipt["mlx_c_library"]["identity"]["sha256"] == regular_file_identity(
+        library
+    )["sha256"]
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    assert receipt["receipt_sha256"] == canonical_sha256(unsigned)
 
 
 def test_model_identity_streams_past_native_library_cap(tmp_path: Path) -> None:

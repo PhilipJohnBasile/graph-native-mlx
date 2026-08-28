@@ -26,6 +26,7 @@ from graph_model.runtime_identity import (
 
 MLXCELERATOR_RUNTIME_PROBE_FORMAT = "graph-native-mlxcelerator-runtime-probe-v1"
 MLXCELERATOR_LLAMA_ADMISSION_FORMAT = "graph-native-mlxcelerator-llama-admission-v1"
+MLXCELERATOR_LLAMA_GENERATION_FORMAT = "graph-native-mlxcelerator-llama-generation-v1"
 _MAX_PROBE_OUTPUT_BYTES = 64 * 1024
 _REQUIRED_KEYS = frozenset(
     {
@@ -70,6 +71,18 @@ _LLAMA_REQUIRED_KEYS = frozenset(
         "rms_norm_epsilon",
         "rope_freq_base",
         "tensor_count",
+    }
+)
+_LLAMA_GENERATION_REQUIRED_KEYS = frozenset(
+    {
+        "schema_version",
+        "backend",
+        "path",
+        "file_size",
+        "digest_sha256",
+        "prompt",
+        "max_new_tokens",
+        "generated_text",
     }
 )
 
@@ -294,6 +307,190 @@ def admit_mlxcelerator_llama_model(
         "executable": executable_before,
         "model": model_before,
         "admission": admission,
+    }
+    receipt["receipt_sha256"] = canonical_sha256(receipt)
+    return receipt
+
+
+def generate_mlxcelerator_llama_text(
+    executable: str | Path,
+    model: str | Path,
+    mlx_c_library: str | Path,
+    prompt: str,
+    max_new_tokens: int,
+    *,
+    expected_executable_sha256: str,
+    expected_model_sha256: str,
+    expected_library_manifest_sha256: str,
+    expected_mlx_c_sha256: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Authenticate and run the native MLX Llama generation command.
+
+    The executable, model, and complete MLX library directory are copied into
+    a private snapshot before execution. The returned receipt binds the exact
+    content identities, native Mach-O closure, prompt, token budget, backend,
+    and generated text.
+    """
+
+    _validate_timeout(timeout_seconds)
+    if (
+        isinstance(max_new_tokens, bool)
+        or not isinstance(max_new_tokens, int)
+        or not 0 <= max_new_tokens <= 1_000_000
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-token-budget-invalid")
+    if not isinstance(prompt, str) or len(prompt.encode("utf-8")) > _MAX_PROBE_OUTPUT_BYTES:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-prompt-invalid")
+    executable_path = _require_executable(Path(executable))
+    model_path = _require_regular_file(Path(model), "model")
+    mlx_c_path = _require_regular_file(Path(mlx_c_library), "mlx-c-library")
+    mlx_library_root = mlx_c_path.parent
+    executable_before = regular_file_identity(executable_path)
+    model_before = _model_file_identity(model_path)
+    mlx_c_before = regular_file_identity(mlx_c_path)
+    library_before = _library_manifest(mlx_library_root)
+    if executable_before["sha256"] != expected_executable_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-executable-unauthorized")
+    if model_before["sha256"] != expected_model_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-model-unauthorized")
+    if library_before["manifest_sha256"] != expected_library_manifest_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-library-unauthorized")
+    if mlx_c_before["sha256"] != expected_mlx_c_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-mlx-c-unauthorized")
+
+    with tempfile.TemporaryDirectory(prefix="graph-mlxcelerator-llama-generation-") as temporary:
+        snapshot_root = Path(temporary)
+        snapshot_executable = snapshot_root / "mlxcelerator"
+        snapshot_model = snapshot_root / "model.gguf"
+        snapshot_library_root = snapshot_root / "mlx"
+        try:
+            shutil.copy2(executable_path, snapshot_executable, follow_symlinks=False)
+            shutil.copy2(model_path, snapshot_model, follow_symlinks=False)
+            shutil.copytree(
+                mlx_library_root,
+                snapshot_library_root,
+                symlinks=True,
+                copy_function=shutil.copy2,
+            )
+        except OSError as exc:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-failed"
+            ) from exc
+        snapshot_executable.chmod(executable_before["mode"])
+        snapshot_executable_identity = regular_file_identity(snapshot_executable)
+        snapshot_model_identity = _model_file_identity(snapshot_model)
+        snapshot_library = _library_manifest(snapshot_library_root)
+        if snapshot_executable_identity["sha256"] != executable_before["sha256"]:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-executable-drift"
+            )
+        if snapshot_model_identity["sha256"] != model_before["sha256"]:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-model-drift"
+            )
+        if not _same_tree_content(library_before, snapshot_library):
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-library-drift"
+            )
+        snapshot_mlx_c = snapshot_library_root / mlx_c_path.name
+        if regular_file_identity(snapshot_mlx_c)["sha256"] != mlx_c_before["sha256"]:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-mlx-c-drift"
+            )
+        snapshot_preloads = tuple(
+            candidate
+            for name in ("libjaccl.dylib", "libmlx.dylib")
+            if (candidate := snapshot_library_root / name).is_file()
+        )
+        native_closure = observe_macho_runtime_closure(
+            snapshot_executable,
+            required_binary_paths=(snapshot_mlx_c,),
+            preloaded_binary_paths=snapshot_preloads,
+            owned_native_roots=(snapshot_root,),
+        )
+        returncode, stdout, stderr = _run_probe_bounded(
+            [
+                str(snapshot_executable),
+                "llama-generate-mlx",
+                str(snapshot_model),
+                str(snapshot_mlx_c),
+                str(max_new_tokens),
+                prompt,
+            ],
+            cwd=snapshot_root,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+            },
+            timeout=timeout_seconds,
+        )
+        if regular_file_identity(snapshot_executable) != snapshot_executable_identity:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-executable-drift"
+            )
+        if _model_file_identity(snapshot_model) != snapshot_model_identity:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-model-drift"
+            )
+        if _library_manifest(snapshot_library_root) != snapshot_library:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-snapshot-library-drift"
+            )
+        if (
+            observe_macho_runtime_closure(
+                snapshot_executable,
+                required_binary_paths=(snapshot_mlx_c,),
+                preloaded_binary_paths=snapshot_preloads,
+                owned_native_roots=(snapshot_root,),
+            )
+            != native_closure
+        ):
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-generation-native-closure-drift"
+            )
+
+    if returncode != 0:
+        raise MlxceleratorRuntimeError(
+            f"mlxcelerator-llama-generation-exit:{returncode}"
+        )
+    try:
+        output = stdout.decode("utf-8", errors="strict")
+        stderr.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-not-utf8"
+        ) from exc
+    generation = _parse_llama_generation_output(
+        output,
+        model_before,
+        prompt,
+        max_new_tokens,
+    )
+    executable_after = regular_file_identity(executable_path)
+    model_after = _model_file_identity(model_path)
+    mlx_c_after = regular_file_identity(mlx_c_path)
+    library_after = _library_manifest(mlx_library_root)
+    if executable_before != executable_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-executable-drift")
+    if model_before != model_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-model-drift")
+    if mlx_c_before != mlx_c_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-mlx-c-drift")
+    if library_before != library_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-library-drift")
+    receipt = {
+        "format": MLXCELERATOR_LLAMA_GENERATION_FORMAT,
+        "executable": executable_before,
+        "model": model_before,
+        "mlx_c_library": {
+            "relative_path": mlx_c_path.name,
+            "identity": mlx_c_before,
+        },
+        "mlx_library_manifest": library_before,
+        "native_closure": native_closure,
+        "generation": generation,
     }
     receipt["receipt_sha256"] = canonical_sha256(receipt)
     return receipt
@@ -716,6 +913,67 @@ def _parse_llama_index_output(
         "digest_sha256": value["digest_sha256"],
         "rms_norm_epsilon": value["rms_norm_epsilon"],
         "rope_freq_base": value["rope_freq_base"],
+    }
+
+
+def _parse_llama_generation_output(
+    output: str,
+    model_identity: dict[str, Any],
+    prompt: str,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-json-invalid"
+        ) from exc
+    if not isinstance(value, dict) or set(value) != _LLAMA_GENERATION_REQUIRED_KEYS:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-schema-invalid")
+    if (
+        isinstance(value["schema_version"], bool)
+        or not isinstance(value["schema_version"], int)
+        or value["schema_version"] != 1
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-schema-version-invalid"
+        )
+    if value["backend"] != "mlx-gpu-linear-host-attention-v1":
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-backend-invalid")
+    if not isinstance(value["path"], str) or not value["path"]:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-path-invalid")
+    if (
+        isinstance(value["file_size"], bool)
+        or not isinstance(value["file_size"], int)
+        or value["file_size"] != model_identity["bytes"]
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-size-mismatch")
+    if (
+        not isinstance(value["digest_sha256"], str)
+        or value["digest_sha256"] != model_identity["sha256"]
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-digest-mismatch")
+    if value["prompt"] != prompt:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-prompt-mismatch")
+    if (
+        isinstance(value["max_new_tokens"], bool)
+        or not isinstance(value["max_new_tokens"], int)
+        or value["max_new_tokens"] != max_new_tokens
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-token-budget-mismatch"
+        )
+    if not isinstance(value["generated_text"], str):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-text-invalid")
+    return {
+        "schema_version": 1,
+        "backend": value["backend"],
+        "path": value["path"],
+        "file_size": value["file_size"],
+        "digest_sha256": value["digest_sha256"],
+        "prompt": value["prompt"],
+        "max_new_tokens": value["max_new_tokens"],
+        "generated_text": value["generated_text"],
     }
 
 
