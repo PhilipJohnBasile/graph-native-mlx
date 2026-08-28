@@ -92,7 +92,9 @@ def probe_mlxcelerator_runtime(
     Source artifacts are authenticated, copied into a private per-probe
     snapshot, authenticated again, and executed from that snapshot. The local
     account remains inside the trust boundary, as it does for the rest of
-    Graph-Native's user-owned runtime identities.
+    Graph-Native's user-owned runtime identities. When an MLX-C library is
+    supplied, the Rust probe verifies a native F32 GPU matrix multiplication,
+    not just symbol presence.
     """
 
     _validate_timeout(timeout_seconds)
