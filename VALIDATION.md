@@ -50,6 +50,9 @@
 - failed-run route/edge/stop imitation is reward-masked to zero while failed runs remain active for value and cost learning
 - controlled bootstrap corpus generation produced 16 clean Git repositories spanning fast, deep, repair, no-change, completed, and bounded-failure cases without embedding expected labels in the worktree
 - bootstrap collector shell syntax and dedicated trace/export paths passed portable validation
+- Graph's native MLX generation bridge validates `ffn_mode=mlx-resident`, passes
+  `MLXC_USE_DEVICE_FFN=1` only for the opt-in path, and rejects receipts that
+  omit or misreport the mode; host mode remains the default
 
 ## v0.5.6 qualification checks
 

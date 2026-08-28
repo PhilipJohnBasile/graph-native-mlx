@@ -85,19 +85,11 @@ _LLAMA_GENERATION_REQUIRED_KEYS = frozenset(
         "generated_text",
     }
 )
-_LLAMA_GENERATION_SDPA_REQUIRED_KEYS = _LLAMA_GENERATION_REQUIRED_KEYS | {
-    "attention_mode",
-}
-_LLAMA_GENERATION_ROPE_REQUIRED_KEYS = _LLAMA_GENERATION_REQUIRED_KEYS | {
-    "rope_mode",
-}
-_LLAMA_GENERATION_SDPA_ROPE_REQUIRED_KEYS = (
-    _LLAMA_GENERATION_SDPA_REQUIRED_KEYS | {"rope_mode"}
-)
 _LLAMA_GENERATION_HOST_BACKEND = "mlx-gpu-linear-host-attention-v1"
 _LLAMA_GENERATION_SDPA_BACKEND = "mlx-gpu-linear-sdpa-host-kv-v1"
 _LLAMA_ATTENTION_MODES = frozenset({"host", "sdpa"})
 _LLAMA_ROPE_MODES = frozenset({"host", "mlx-fast"})
+_LLAMA_FFN_MODES = frozenset({"host", "mlx-resident"})
 
 
 class MlxceleratorRuntimeError(RuntimeError):
@@ -338,6 +330,7 @@ def generate_mlxcelerator_llama_text(
     expected_mlx_c_sha256: str,
     attention_mode: str = "host",
     rope_mode: str = "host",
+    ffn_mode: str = "host",
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Authenticate and run the native MLX Llama generation command.
@@ -349,8 +342,9 @@ def generate_mlxcelerator_llama_text(
     ``MLXC_USE_SDPA=1`` and requires the runtime to report the distinct SDPA
     backend and mode in its output. ``rope_mode="mlx-fast"`` passes
     ``MLXC_USE_ROPE=1`` and requires an explicit ``rope_mode`` receipt field.
-    Both modes fail closed against an older binary that silently ignores the
-    request.
+    ``ffn_mode="mlx-resident"`` passes ``MLXC_USE_DEVICE_FFN=1`` and requires
+    an explicit ``ffn_mode`` receipt field. All opt-in modes fail closed
+    against an older binary that silently ignores the request.
     """
 
     _validate_timeout(timeout_seconds)
@@ -363,6 +357,8 @@ def generate_mlxcelerator_llama_text(
         )
     if not isinstance(rope_mode, str) or rope_mode not in _LLAMA_ROPE_MODES:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-rope-mode-invalid")
+    if not isinstance(ffn_mode, str) or ffn_mode not in _LLAMA_FFN_MODES:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-ffn-mode-invalid")
     if (
         isinstance(max_new_tokens, bool)
         or not isinstance(max_new_tokens, int)
@@ -450,6 +446,8 @@ def generate_mlxcelerator_llama_text(
             runtime_env["MLXC_USE_SDPA"] = "1"
         if rope_mode == "mlx-fast":
             runtime_env["MLXC_USE_ROPE"] = "1"
+        if ffn_mode == "mlx-resident":
+            runtime_env["MLXC_USE_DEVICE_FFN"] = "1"
         returncode, stdout, stderr = _run_probe_bounded(
             [
                 str(snapshot_executable),
@@ -506,6 +504,7 @@ def generate_mlxcelerator_llama_text(
         max_new_tokens,
         attention_mode,
         rope_mode,
+        ffn_mode,
     )
     executable_after = regular_file_identity(executable_path)
     model_after = _model_file_identity(model_path)
@@ -962,6 +961,7 @@ def _parse_llama_generation_output(
     max_new_tokens: int,
     attention_mode: str = "host",
     rope_mode: str = "host",
+    ffn_mode: str = "host",
 ) -> dict[str, Any]:
     try:
         value = json.loads(output)
@@ -969,14 +969,13 @@ def _parse_llama_generation_output(
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-json-invalid"
         ) from exc
-    if attention_mode == "sdpa" and rope_mode == "mlx-fast":
-        required_keys = _LLAMA_GENERATION_SDPA_ROPE_REQUIRED_KEYS
-    elif attention_mode == "sdpa":
-        required_keys = _LLAMA_GENERATION_SDPA_REQUIRED_KEYS
-    elif rope_mode == "mlx-fast":
-        required_keys = _LLAMA_GENERATION_ROPE_REQUIRED_KEYS
-    else:
-        required_keys = _LLAMA_GENERATION_REQUIRED_KEYS
+    required_keys = set(_LLAMA_GENERATION_REQUIRED_KEYS)
+    if attention_mode == "sdpa":
+        required_keys.add("attention_mode")
+    if rope_mode == "mlx-fast":
+        required_keys.add("rope_mode")
+    if ffn_mode == "mlx-resident":
+        required_keys.add("ffn_mode")
     if not isinstance(value, dict) or set(value) != required_keys:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-schema-invalid")
     if (
@@ -1001,6 +1000,10 @@ def _parse_llama_generation_output(
     if rope_mode == "mlx-fast" and value["rope_mode"] != "mlx-fast":
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-rope-mode-mismatch"
+        )
+    if ffn_mode == "mlx-resident" and value["ffn_mode"] != "mlx-resident":
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-ffn-mode-mismatch"
         )
     if not isinstance(value["path"], str) or not value["path"]:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-path-invalid")
@@ -1041,6 +1044,8 @@ def _parse_llama_generation_output(
         generation["attention_mode"] = value["attention_mode"]
     if rope_mode == "mlx-fast":
         generation["rope_mode"] = value["rope_mode"]
+    if ffn_mode == "mlx-resident":
+        generation["ffn_mode"] = value["ffn_mode"]
     return generation
 
 

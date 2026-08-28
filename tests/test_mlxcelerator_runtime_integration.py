@@ -107,6 +107,19 @@ def _llama_script(tmp_path: Path, output: str) -> Path:
     return executable
 
 
+def _host_llama_script(tmp_path: Path, output: str) -> Path:
+    executable = tmp_path / "mlxcelerator"
+    escaped = output.replace("'", "'\"'\"'")
+    executable.write_text(
+        f"#!/bin/sh\n"
+        f"if [ -n \"$MLXC_USE_DEVICE_FFN\" ]; then exit 93; fi\n"
+        f"printf '%s' '{escaped}'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
 def _sdpa_llama_script(tmp_path: Path, output: str) -> Path:
     executable = tmp_path / "mlxcelerator"
     escaped = output.replace("'", "'\"'\"'")
@@ -126,6 +139,19 @@ def _rope_llama_script(tmp_path: Path, output: str) -> Path:
     executable.write_text(
         f"#!/bin/sh\n"
         f"if [ \"$MLXC_USE_ROPE\" != \"1\" ]; then exit 92; fi\n"
+        f"printf '%s' '{escaped}'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
+def _ffn_llama_script(tmp_path: Path, output: str) -> Path:
+    executable = tmp_path / "mlxcelerator"
+    escaped = output.replace("'", "'\"'\"'")
+    executable.write_text(
+        f"#!/bin/sh\n"
+        f"if [ \"$MLXC_USE_DEVICE_FFN\" != \"1\" ]; then exit 94; fi\n"
         f"printf '%s' '{escaped}'\n",
         encoding="utf-8",
     )
@@ -215,7 +241,7 @@ def test_llama_generation_authenticates_native_backend_and_output(
         },
         separators=(",", ":"),
     )
-    executable = _llama_script(tmp_path, output)
+    executable = _host_llama_script(tmp_path, output)
     receipt = generate_mlxcelerator_llama_text(
         executable,
         model,
@@ -389,6 +415,179 @@ def test_llama_generation_native_rope_requires_and_passes_explicit_mode_evidence
 
     assert receipt["generation"]["rope_mode"] == "mlx-fast"
     assert receipt["generation"]["backend"] == "mlx-gpu-linear-host-attention-v1"
+
+
+def test_llama_generation_device_ffn_requires_and_passes_explicit_mode_evidence(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-host-attention-v1",
+            "ffn_mode": "mlx-resident",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _ffn_llama_script(tmp_path, output)
+
+    receipt = generate_mlxcelerator_llama_text(
+        executable,
+        model,
+        library,
+        "hello",
+        2,
+        expected_executable_sha256=regular_file_identity(executable)["sha256"],
+        expected_model_sha256=model_identity["sha256"],
+        expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+        expected_library_manifest_sha256=tree_manifest(
+            library.parent,
+            reject_symlinks=True,
+            require_root_owned=False,
+        )["manifest_sha256"],
+        ffn_mode="mlx-resident",
+    )
+
+    assert receipt["generation"]["ffn_mode"] == "mlx-resident"
+    assert receipt["generation"]["backend"] == "mlx-gpu-linear-host-attention-v1"
+
+
+def test_llama_generation_device_ffn_rejects_missing_mode_evidence(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-host-attention-v1",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _ffn_llama_script(tmp_path, output)
+
+    with pytest.raises(
+        MlxceleratorRuntimeError,
+        match="mlxcelerator-llama-generation-schema-invalid",
+    ):
+        generate_mlxcelerator_llama_text(
+            executable,
+            model,
+            library,
+            "hello",
+            2,
+            expected_executable_sha256=regular_file_identity(executable)["sha256"],
+            expected_model_sha256=model_identity["sha256"],
+            expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+            expected_library_manifest_sha256=tree_manifest(
+                library.parent,
+                reject_symlinks=True,
+                require_root_owned=False,
+            )["manifest_sha256"],
+            ffn_mode="mlx-resident",
+        )
+
+
+def test_llama_generation_device_ffn_rejects_mismatched_mode_evidence(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-host-attention-v1",
+            "ffn_mode": "host",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _ffn_llama_script(tmp_path, output)
+
+    with pytest.raises(
+        MlxceleratorRuntimeError,
+        match="mlxcelerator-llama-generation-ffn-mode-mismatch",
+    ):
+        generate_mlxcelerator_llama_text(
+            executable,
+            model,
+            library,
+            "hello",
+            2,
+            expected_executable_sha256=regular_file_identity(executable)["sha256"],
+            expected_model_sha256=model_identity["sha256"],
+            expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+            expected_library_manifest_sha256=tree_manifest(
+                library.parent,
+                reject_symlinks=True,
+                require_root_owned=False,
+            )["manifest_sha256"],
+            ffn_mode="mlx-resident",
+        )
+
+
+def test_llama_generation_rejects_invalid_ffn_mode(tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    executable = _llama_script(tmp_path, "{}")
+
+    with pytest.raises(
+        MlxceleratorRuntimeError,
+        match="mlxcelerator-llama-generation-ffn-mode-invalid",
+    ):
+        generate_mlxcelerator_llama_text(
+            executable,
+            model,
+            library,
+            "hello",
+            2,
+            expected_executable_sha256=regular_file_identity(executable)["sha256"],
+            expected_model_sha256=regular_file_identity(model)["sha256"],
+            expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+            expected_library_manifest_sha256=tree_manifest(
+                library.parent,
+                reject_symlinks=True,
+                require_root_owned=False,
+            )["manifest_sha256"],
+            ffn_mode="device",
+        )
 
 
 def test_model_identity_streams_past_native_library_cap(tmp_path: Path) -> None:

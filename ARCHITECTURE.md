@@ -183,6 +183,16 @@ A resumed run must match its stored provider and controller identity. Changing m
 
 The M5 qualification command checks platform, immutable model identity, model load, capability discovery, hidden-feature determinism, repeated-generation behavior, and MLX memory counters. It writes a content-hashed report.
 
+The Graph integration exposes the native MLX Llama generator through an
+authenticated receipt. Attention and rotary acceleration remain explicit
+options, and `ffn_mode` accepts `host` (the default) or `mlx-resident`. The
+resident option passes `MLXC_USE_DEVICE_FFN=1` only for that request and
+requires the runtime JSON to return `ffn_mode=mlx-resident`; an older binary
+that ignores the request is rejected. The receipt still records the exact
+executable, model, MLX-C library, native closure, prompt, token budget, and
+generated text. Device FFN currently copies its result back before the host
+residual, so this contract does not claim a fully device-resident decoder.
+
 An exposed `mtp_forward` method is treated as capability only. The direct v0.5.3 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
 
 ## Promotion boundary
