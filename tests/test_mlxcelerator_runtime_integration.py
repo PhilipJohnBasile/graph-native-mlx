@@ -10,6 +10,7 @@ from graph_model.integrations.mlxcelerator_runtime import (
     MLXCELERATOR_LLAMA_ADMISSION_FORMAT,
     MLXCELERATOR_RUNTIME_PROBE_FORMAT,
     MlxceleratorRuntimeError,
+    _model_file_identity,
     admit_mlxcelerator_llama_model,
     probe_mlxcelerator_runtime,
 )
@@ -161,6 +162,17 @@ def test_llama_admission_rejects_digest_mismatch(tmp_path: Path) -> None:
             expected_executable_sha256=regular_file_identity(executable)["sha256"],
             expected_model_sha256="0" * 64,
         )
+
+
+def test_model_identity_streams_past_native_library_cap(tmp_path: Path) -> None:
+    model = tmp_path / "large-model.gguf"
+    with model.open("wb") as handle:
+        handle.truncate(256 * 1024 * 1024 + 1)
+
+    identity = _model_file_identity(model)
+
+    assert identity["bytes"] == 256 * 1024 * 1024 + 1
+    assert len(identity["sha256"]) == 64
 
 
 def test_receipt_binds_the_selected_mlx_c_file(tmp_path: Path) -> None:

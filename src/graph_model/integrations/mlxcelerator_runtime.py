@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import json
+import hashlib
 import os
 import selectors
 import signal
@@ -52,6 +53,7 @@ _ADMISSION_REASONS = frozenset(
     {"qualified", "non_apple_silicon", "below_m5_max_floor", "unknown_hardware"}
 )
 _U64_MAX = (1 << 64) - 1
+_MAX_MODEL_BYTES = 1 << 40
 _LLAMA_REQUIRED_KEYS = frozenset(
     {
         "schema_version",
@@ -232,7 +234,7 @@ def admit_mlxcelerator_llama_model(
     executable_path = _require_executable(Path(executable))
     model_path = _require_regular_file(Path(model), "model")
     executable_before = regular_file_identity(executable_path)
-    model_before = regular_file_identity(model_path)
+    model_before = _model_file_identity(model_path)
     if executable_before["sha256"] != expected_executable_sha256:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-executable-unauthorized")
     if model_before["sha256"] != expected_model_sha256:
@@ -251,7 +253,7 @@ def admit_mlxcelerator_llama_model(
                 "mlxcelerator-llama-snapshot-failed"
             ) from exc
         snapshot_executable_identity = regular_file_identity(snapshot_executable)
-        snapshot_model_identity = regular_file_identity(snapshot_model)
+        snapshot_model_identity = _model_file_identity(snapshot_model)
         if snapshot_executable_identity["sha256"] != executable_before["sha256"]:
             raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-executable-drift")
         if snapshot_model_identity["sha256"] != model_before["sha256"]:
@@ -268,7 +270,7 @@ def admit_mlxcelerator_llama_model(
         )
         if regular_file_identity(snapshot_executable) != snapshot_executable_identity:
             raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-executable-drift")
-        if regular_file_identity(snapshot_model) != snapshot_model_identity:
+        if _model_file_identity(snapshot_model) != snapshot_model_identity:
             raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-model-drift")
 
     if returncode != 0:
@@ -280,7 +282,7 @@ def admit_mlxcelerator_llama_model(
         raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-not-utf8") from exc
     admission = _parse_llama_index_output(output, model_before)
     executable_after = regular_file_identity(executable_path)
-    model_after = regular_file_identity(model_path)
+    model_after = _model_file_identity(model_path)
     if executable_before != executable_after:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-executable-drift")
     if model_before != model_after:
@@ -435,6 +437,79 @@ def _require_regular_file(path: Path, label: str) -> Path:
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise MlxceleratorRuntimeError(f"mlxcelerator-runtime-{label}-invalid")
     return absolute
+
+
+def _model_file_identity(path: Path) -> dict[str, Any]:
+    """Hash a stable model file without applying the native-library size cap."""
+
+    target = path.absolute()
+    try:
+        before = target.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-invalid")
+        if before.st_size > _MAX_MODEL_BYTES:
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-too-large")
+        descriptor = os.open(
+            target,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except MlxceleratorRuntimeError:
+        raise
+    except OSError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_size != before.st_size or opened.st_size > _MAX_MODEL_BYTES:
+            raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-replaced")
+        digest = hashlib.sha256()
+        bytes_read = 0
+        while bytes_read < opened.st_size:
+            chunk = os.read(descriptor, min(1024 * 1024, opened.st_size - bytes_read))
+            if not chunk:
+                raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-replaced")
+            digest.update(chunk)
+            bytes_read += len(chunk)
+        after_read = os.fstat(descriptor)
+    except MlxceleratorRuntimeError:
+        raise
+    except OSError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-read-failed") from exc
+    finally:
+        os.close(descriptor)
+    try:
+        after_path = target.lstat()
+    except OSError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-replaced") from exc
+    if _stable_file_metadata(before) != _stable_file_metadata(after_read) or _stable_file_metadata(
+        before
+    ) != _stable_file_metadata(after_path):
+        raise MlxceleratorRuntimeError("mlxcelerator-runtime-model-replaced")
+    return {
+        "path": str(target),
+        "bytes": opened.st_size,
+        "device": opened.st_dev,
+        "inode": opened.st_ino,
+        "links": opened.st_nlink,
+        "mode": stat.S_IMODE(opened.st_mode),
+        "uid": opened.st_uid,
+        "gid": opened.st_gid,
+        "mtime_ns": opened.st_mtime_ns,
+        "ctime_ns": opened.st_ctime_ns,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _stable_file_metadata(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _reject_symlinked_components(path: Path, label: str) -> None:
