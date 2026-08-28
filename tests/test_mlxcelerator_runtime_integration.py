@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 import pytest
 
 from graph_model.integrations.mlxcelerator_runtime import (
+    MLXCELERATOR_LLAMA_ADMISSION_FORMAT,
     MLXCELERATOR_RUNTIME_PROBE_FORMAT,
     MlxceleratorRuntimeError,
+    admit_mlxcelerator_llama_model,
     probe_mlxcelerator_runtime,
 )
 from graph_model.runtime_identity import (
@@ -88,6 +91,76 @@ def test_probe_authenticates_runtime_and_capabilities(
     assert receipt["capabilities"]["core_ai_units"] == ["cpu", "gpu", "ane"]
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     assert receipt["receipt_sha256"] == canonical_sha256(unsigned)
+
+
+def _llama_script(tmp_path: Path, output: str) -> Path:
+    executable = tmp_path / "mlxcelerator"
+    escaped = output.replace("'", "'\"'\"'")
+    executable.write_text(
+        f"#!/bin/sh\nprintf '%s' '{escaped}'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
+def test_llama_admission_authenticates_model_and_configuration(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "context_length": 16,
+            "embedding_length": 4,
+            "block_count": 1,
+            "head_count": 2,
+            "head_count_kv": 1,
+            "feed_forward_length": 8,
+            "vocab_size": 8,
+            "rms_norm_epsilon": 1e-5,
+            "rope_freq_base": 10000.0,
+            "tensor_count": 12,
+        },
+        separators=(",", ":"),
+    )
+    executable = _llama_script(tmp_path, output)
+
+    receipt = admit_mlxcelerator_llama_model(
+        executable,
+        model,
+        expected_executable_sha256=regular_file_identity(executable)["sha256"],
+        expected_model_sha256=model_identity["sha256"],
+    )
+
+    assert receipt["format"] == MLXCELERATOR_LLAMA_ADMISSION_FORMAT
+    assert receipt["admission"]["embedding_length"] == 4
+    assert receipt["admission"]["head_count_kv"] == 1
+    assert receipt["model"]["sha256"] == model_identity["sha256"]
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    assert receipt["receipt_sha256"] == canonical_sha256(unsigned)
+
+
+def test_llama_admission_rejects_digest_mismatch(tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    executable = _llama_script(tmp_path, "{}")
+
+    with pytest.raises(
+        MlxceleratorRuntimeError,
+        match="mlxcelerator-llama-model-unauthorized",
+    ):
+        admit_mlxcelerator_llama_model(
+            executable,
+            model,
+            expected_executable_sha256=regular_file_identity(executable)["sha256"],
+            expected_model_sha256="0" * 64,
+        )
 
 
 def test_receipt_binds_the_selected_mlx_c_file(tmp_path: Path) -> None:

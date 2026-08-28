@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import os
 import selectors
 import signal
@@ -23,6 +24,7 @@ from graph_model.runtime_identity import (
 
 
 MLXCELERATOR_RUNTIME_PROBE_FORMAT = "graph-native-mlxcelerator-runtime-probe-v1"
+MLXCELERATOR_LLAMA_ADMISSION_FORMAT = "graph-native-mlxcelerator-llama-admission-v1"
 _MAX_PROBE_OUTPUT_BYTES = 64 * 1024
 _REQUIRED_KEYS = frozenset(
     {
@@ -50,6 +52,24 @@ _ADMISSION_REASONS = frozenset(
     {"qualified", "non_apple_silicon", "below_m5_max_floor", "unknown_hardware"}
 )
 _U64_MAX = (1 << 64) - 1
+_LLAMA_REQUIRED_KEYS = frozenset(
+    {
+        "schema_version",
+        "path",
+        "file_size",
+        "digest_sha256",
+        "context_length",
+        "embedding_length",
+        "block_count",
+        "head_count",
+        "head_count_kv",
+        "feed_forward_length",
+        "vocab_size",
+        "rms_norm_epsilon",
+        "rope_freq_base",
+        "tensor_count",
+    }
+)
 
 
 class MlxceleratorRuntimeError(RuntimeError):
@@ -188,6 +208,88 @@ def probe_mlxcelerator_runtime(
         "mlx_library_manifest": library_before,
         "native_closure": native_closure,
         "capabilities": capabilities,
+    }
+    receipt["receipt_sha256"] = canonical_sha256(receipt)
+    return receipt
+
+
+def admit_mlxcelerator_llama_model(
+    executable: str | Path,
+    model: str | Path,
+    *,
+    expected_executable_sha256: str,
+    expected_model_sha256: str,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Authenticate and run the Rust Llama model-admission command.
+
+    The executable and model are copied into a private snapshot before the
+    command runs. The receipt proves only metadata and tensor-layout admission,
+    not decoder execution or text generation.
+    """
+
+    _validate_timeout(timeout_seconds)
+    executable_path = _require_executable(Path(executable))
+    model_path = _require_regular_file(Path(model), "model")
+    executable_before = regular_file_identity(executable_path)
+    model_before = regular_file_identity(model_path)
+    if executable_before["sha256"] != expected_executable_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-executable-unauthorized")
+    if model_before["sha256"] != expected_model_sha256:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-model-unauthorized")
+
+    with tempfile.TemporaryDirectory(prefix="graph-mlxcelerator-llama-") as temporary:
+        snapshot_root = Path(temporary)
+        snapshot_executable = snapshot_root / "mlxcelerator"
+        snapshot_model = snapshot_root / "model.gguf"
+        try:
+            shutil.copy2(executable_path, snapshot_executable, follow_symlinks=False)
+            shutil.copy2(model_path, snapshot_model, follow_symlinks=False)
+            snapshot_executable.chmod(executable_before["mode"])
+        except OSError as exc:
+            raise MlxceleratorRuntimeError(
+                "mlxcelerator-llama-snapshot-failed"
+            ) from exc
+        snapshot_executable_identity = regular_file_identity(snapshot_executable)
+        snapshot_model_identity = regular_file_identity(snapshot_model)
+        if snapshot_executable_identity["sha256"] != executable_before["sha256"]:
+            raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-executable-drift")
+        if snapshot_model_identity["sha256"] != model_before["sha256"]:
+            raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-model-drift")
+        returncode, stdout, stderr = _run_probe_bounded(
+            [str(snapshot_executable), "llama-index", str(snapshot_model)],
+            cwd=snapshot_root,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+            },
+            timeout=timeout_seconds,
+        )
+        if regular_file_identity(snapshot_executable) != snapshot_executable_identity:
+            raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-executable-drift")
+        if regular_file_identity(snapshot_model) != snapshot_model_identity:
+            raise MlxceleratorRuntimeError("mlxcelerator-llama-snapshot-model-drift")
+
+    if returncode != 0:
+        raise MlxceleratorRuntimeError(f"mlxcelerator-llama-admission-exit:{returncode}")
+    try:
+        output = stdout.decode("utf-8", errors="strict")
+        stderr.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-not-utf8") from exc
+    admission = _parse_llama_index_output(output, model_before)
+    executable_after = regular_file_identity(executable_path)
+    model_after = regular_file_identity(model_path)
+    if executable_before != executable_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-executable-drift")
+    if model_before != model_after:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-model-drift")
+    receipt = {
+        "format": MLXCELERATOR_LLAMA_ADMISSION_FORMAT,
+        "executable": executable_before,
+        "model": model_before,
+        "admission": admission,
     }
     receipt["receipt_sha256"] = canonical_sha256(receipt)
     return receipt
@@ -459,6 +561,84 @@ def _parse_probe_output(output: str) -> dict[str, Any]:
             "cpu": values["lane_cpu"],
             "ane": values["lane_ane"],
         },
+    }
+
+
+def _parse_llama_index_output(
+    output: str, model_identity: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-json-invalid") from exc
+    if not isinstance(value, dict) or set(value) != _LLAMA_REQUIRED_KEYS:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-schema-invalid")
+    if (
+        isinstance(value["schema_version"], bool)
+        or not isinstance(value["schema_version"], int)
+        or value["schema_version"] != 1
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-schema-version-invalid")
+    if not isinstance(value["path"], str) or not value["path"]:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-path-invalid")
+    if (
+        isinstance(value["file_size"], bool)
+        or not isinstance(value["file_size"], int)
+        or value["file_size"] != model_identity["bytes"]
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-size-mismatch")
+    if (
+        not isinstance(value["digest_sha256"], str)
+        or value["digest_sha256"] != model_identity["sha256"]
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-admission-digest-mismatch")
+    dimensions = {}
+    for key in (
+        "context_length",
+        "embedding_length",
+        "block_count",
+        "head_count",
+        "head_count_kv",
+        "feed_forward_length",
+        "vocab_size",
+        "tensor_count",
+    ):
+        item = value[key]
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-llama-admission-{key}-invalid"
+            )
+        dimensions[key] = item
+    for key in ("rms_norm_epsilon", "rope_freq_base"):
+        item = value[key]
+        if (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(item)
+            or item <= 0
+        ):
+            raise MlxceleratorRuntimeError(
+                f"mlxcelerator-llama-admission-{key}-invalid"
+            )
+    if dimensions["head_count_kv"] > dimensions["head_count"]:
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-admission-head-count-kv-invalid"
+        )
+    if dimensions["head_count"] % dimensions["head_count_kv"]:
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-admission-head-count-kv-invalid"
+        )
+    if dimensions["embedding_length"] % dimensions["head_count"]:
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-admission-embedding-length-invalid"
+        )
+    return {
+        **dimensions,
+        "path": value["path"],
+        "file_size": value["file_size"],
+        "digest_sha256": value["digest_sha256"],
+        "rms_norm_epsilon": value["rms_norm_epsilon"],
+        "rope_freq_base": value["rope_freq_base"],
     }
 
 
