@@ -339,6 +339,10 @@ def generate_mlxcelerator_llama_text(
     ffn_mode: str = "host",
     hidden_state_mode: str = "host",
     quantization_mode: str = "host",
+    temperature: float = 0.0,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    seed: int = 0,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Authenticate and run the native MLX Llama generation command.
@@ -363,7 +367,9 @@ def generate_mlxcelerator_llama_text(
     ``quantization_mode="mlx-affine-q4-v1"`` passes ``MLXC_USE_QUANTIZED=1``
     and requires the exact quantization receipt field. The mode is an explicit
     MLX affine representation, not a claim that GGUF block formats are
-    losslessly interchangeable with it.
+    losslessly interchangeable with it. Sampling controls are validated here,
+    passed to the shared Rust sampler, and included in the authenticated
+    receipt.
     """
 
     _validate_timeout(timeout_seconds)
@@ -399,6 +405,30 @@ def generate_mlxcelerator_llama_text(
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-quantization-mode-invalid"
         )
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(float(temperature))
+        or float(temperature) < 0.0
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-temperature-invalid"
+        )
+    if (
+        isinstance(top_k, bool)
+        or not isinstance(top_k, int)
+        or not 0 <= top_k <= 1_000_000
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-top-k-invalid")
+    if (
+        isinstance(top_p, bool)
+        or not isinstance(top_p, (int, float))
+        or not math.isfinite(float(top_p))
+        or not 0.0 < float(top_p) <= 1.0
+    ):
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-top-p-invalid")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= _U64_MAX:
+        raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-seed-invalid")
     if (
         attention_projection_mode == "mlx-resident-query-sdpa-v1"
         and (attention_mode != "sdpa" or rope_mode != "mlx-fast")
@@ -508,15 +538,24 @@ def generate_mlxcelerator_llama_text(
             runtime_env["MLXC_USE_DEVICE_RESIDUAL"] = "1"
         if quantization_mode == "mlx-affine-q4-v1":
             runtime_env["MLXC_USE_QUANTIZED"] = "1"
+        command = [
+            str(snapshot_executable),
+            "llama-generate-mlx",
+            str(snapshot_model),
+            str(snapshot_mlx_c),
+            str(max_new_tokens),
+            "--temperature",
+            format(float(temperature), ".9g"),
+            "--top-k",
+            str(top_k),
+            "--top-p",
+            format(float(top_p), ".9g"),
+            "--seed",
+            str(seed),
+            prompt,
+        ]
         returncode, stdout, stderr = _run_probe_bounded(
-            [
-                str(snapshot_executable),
-                "llama-generate-mlx",
-                str(snapshot_model),
-                str(snapshot_mlx_c),
-                str(max_new_tokens),
-                prompt,
-            ],
+            command,
             cwd=snapshot_root,
             env=runtime_env,
             timeout=timeout_seconds,
@@ -592,6 +631,12 @@ def generate_mlxcelerator_llama_text(
         "mlx_library_manifest": library_before,
         "native_closure": native_closure,
         "generation": generation,
+        "sampling": {
+            "temperature": float(temperature),
+            "top_k": top_k,
+            "top_p": float(top_p),
+            "seed": seed,
+        },
     }
     receipt["receipt_sha256"] = canonical_sha256(receipt)
     return receipt

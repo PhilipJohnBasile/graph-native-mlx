@@ -120,6 +120,22 @@ def _host_llama_script(tmp_path: Path, output: str) -> Path:
     return executable
 
 
+def _sampling_llama_script(tmp_path: Path, output: str) -> Path:
+    executable = tmp_path / "mlxcelerator"
+    escaped = output.replace("'", "'\"'\"'")
+    executable.write_text(
+        f"#!/bin/sh\n"
+        f"if [ \"$5\" != \"--temperature\" ] || [ \"$6\" != \"0.8\" ]; then exit 111; fi\n"
+        f"if [ \"$7\" != \"--top-k\" ] || [ \"$8\" != \"4\" ]; then exit 112; fi\n"
+        f"if [ \"$9\" != \"--top-p\" ] || [ \"${{10}}\" != \"0.9\" ]; then exit 113; fi\n"
+        f"if [ \"${{11}}\" != \"--seed\" ] || [ \"${{12}}\" != \"42\" ]; then exit 114; fi\n"
+        f"printf '%s' '{escaped}'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
 def _sdpa_llama_script(tmp_path: Path, output: str) -> Path:
     executable = tmp_path / "mlxcelerator"
     escaped = output.replace("'", "'\"'\"'")
@@ -319,6 +335,58 @@ def test_llama_generation_authenticates_native_backend_and_output(
     )["sha256"]
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     assert receipt["receipt_sha256"] == canonical_sha256(unsigned)
+
+
+def test_llama_generation_passes_and_records_sampling_controls(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-host-attention-v1",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _sampling_llama_script(tmp_path, output)
+    receipt = generate_mlxcelerator_llama_text(
+        executable,
+        model,
+        library,
+        "hello",
+        2,
+        expected_executable_sha256=regular_file_identity(executable)["sha256"],
+        expected_model_sha256=model_identity["sha256"],
+        expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+        expected_library_manifest_sha256=tree_manifest(
+            library.parent,
+            reject_symlinks=True,
+            require_root_owned=False,
+        )["manifest_sha256"],
+        temperature=0.8,
+        top_k=4,
+        top_p=0.9,
+        seed=42,
+    )
+
+    assert receipt["sampling"] == {
+        "temperature": 0.8,
+        "top_k": 4,
+        "top_p": 0.9,
+        "seed": 42,
+    }
 
 
 def test_llama_generation_sdpa_requires_and_passes_explicit_mode_evidence(
