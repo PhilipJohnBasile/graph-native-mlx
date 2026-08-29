@@ -50,6 +50,23 @@
 - failed-run route/edge/stop imitation is reward-masked to zero while failed runs remain active for value and cost learning
 - controlled bootstrap corpus generation produced 16 clean Git repositories spanning fast, deep, repair, no-change, completed, and bounded-failure cases without embedding expected labels in the worktree
 - bootstrap collector shell syntax and dedicated trace/export paths passed portable validation
+- Graph's native MLX generation bridge validates `ffn_mode=mlx-resident`, passes
+  `MLXC_USE_DEVICE_FFN=1` only for the opt-in path, and rejects receipts that
+  omit or misreport the mode; host mode remains the default
+- Graph's native MLX generation bridge validates
+  `attention_projection_mode=mlx-resident-query-sdpa-v1`, passes
+  `MLXC_USE_SDPA_RESIDENT=1` only when SDPA and native RoPE are both selected,
+  and rejects missing or mismatched receipt evidence; host projection remains
+  the default
+- Graph's native MLX generation bridge validates
+  `hidden_state_mode=mlx-resident-hidden-v1`, passes
+  `MLXC_USE_DEVICE_RESIDUAL=1` only with resident attention and FFN, and rejects
+  missing, mismatched, or prerequisite-free hidden-state requests; host hidden
+  state remains the default
+- Graph's native MLX generation bridge validates
+  `quantization_mode=mlx-affine-q4-v1`, passes `MLXC_USE_QUANTIZED=1` only for
+  the opt-in path, and rejects missing or mismatched quantization evidence; host
+  F32 weights remain the default
 
 ## v0.5.6 qualification checks
 

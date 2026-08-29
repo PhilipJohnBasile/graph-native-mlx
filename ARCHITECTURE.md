@@ -183,6 +183,30 @@ A resumed run must match its stored provider and controller identity. Changing m
 
 The M5 qualification command checks platform, immutable model identity, model load, capability discovery, hidden-feature determinism, repeated-generation behavior, and MLX memory counters. It writes a content-hashed report.
 
+The Graph integration exposes the native MLX Llama generator through an
+authenticated receipt. Attention and rotary acceleration remain explicit
+options. `attention_projection_mode` accepts `host` (the default) or
+`mlx-resident-query-sdpa-v1`, and the resident option is valid only with
+`attention_mode=sdpa` and `rope_mode=mlx-fast`. It passes
+`MLXC_USE_SDPA_RESIDENT=1` only for that exact combination and requires the
+runtime JSON to return the same versioned `attention_projection_mode`; an older
+binary that ignores the request is rejected. `ffn_mode` accepts `host` (the
+default) or `mlx-resident`. The resident FFN option passes
+`MLXC_USE_DEVICE_FFN=1` only for that request and requires the runtime JSON to
+return `ffn_mode=mlx-resident`. The receipt still records the exact executable,
+model, MLX-C library, native closure, prompt, token budget, and generated text.
+`hidden_state_mode` accepts `host` (the default) or
+`mlx-resident-hidden-v1`. The resident hidden-state option requires resident
+attention projection and resident FFN, passes `MLXC_USE_DEVICE_RESIDUAL=1`, and
+requires the runtime JSON to return the same versioned mode. This authenticates
+the current hidden-state residency path while keeping the contract explicit
+that it is not yet a fully fused decoder.
+`quantization_mode` accepts `host` (the default) or `mlx-affine-q4-v1`. The
+native option passes `MLXC_USE_QUANTIZED=1` and requires the runtime JSON to
+return the exact versioned mode. It authenticates MLX affine 4-bit weight
+conversion and execution; it does not treat that representation as lossless
+GGUF block-format equivalence.
+
 An exposed `mtp_forward` method is treated as capability only. The direct v0.5.3 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
 
 ## Promotion boundary
