@@ -53,6 +53,11 @@
 - Graph's native MLX generation bridge validates `ffn_mode=mlx-resident`, passes
   `MLXC_USE_DEVICE_FFN=1` only for the opt-in path, and rejects receipts that
   omit or misreport the mode; host mode remains the default
+- Graph's native MLX generation bridge validates
+  `attention_projection_mode=mlx-resident-query-sdpa-v1`, passes
+  `MLXC_USE_SDPA_RESIDENT=1` only when SDPA and native RoPE are both selected,
+  and rejects missing or mismatched receipt evidence; host projection remains
+  the default
 
 ## v0.5.6 qualification checks
 

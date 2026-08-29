@@ -88,6 +88,9 @@ _LLAMA_GENERATION_REQUIRED_KEYS = frozenset(
 _LLAMA_GENERATION_HOST_BACKEND = "mlx-gpu-linear-host-attention-v1"
 _LLAMA_GENERATION_SDPA_BACKEND = "mlx-gpu-linear-sdpa-host-kv-v1"
 _LLAMA_ATTENTION_MODES = frozenset({"host", "sdpa"})
+_LLAMA_ATTENTION_PROJECTION_MODES = frozenset(
+    {"host", "mlx-resident-query-sdpa-v1"}
+)
 _LLAMA_ROPE_MODES = frozenset({"host", "mlx-fast"})
 _LLAMA_FFN_MODES = frozenset({"host", "mlx-resident"})
 
@@ -329,6 +332,7 @@ def generate_mlxcelerator_llama_text(
     expected_library_manifest_sha256: str,
     expected_mlx_c_sha256: str,
     attention_mode: str = "host",
+    attention_projection_mode: str = "host",
     rope_mode: str = "host",
     ffn_mode: str = "host",
     timeout_seconds: float = 30.0,
@@ -342,6 +346,10 @@ def generate_mlxcelerator_llama_text(
     ``MLXC_USE_SDPA=1`` and requires the runtime to report the distinct SDPA
     backend and mode in its output. ``rope_mode="mlx-fast"`` passes
     ``MLXC_USE_ROPE=1`` and requires an explicit ``rope_mode`` receipt field.
+    ``attention_projection_mode="mlx-resident-query-sdpa-v1"`` is valid only
+    with both SDPA and native RoPE enabled. It passes
+    ``MLXC_USE_SDPA_RESIDENT=1`` only for that combination and requires the
+    exact versioned ``attention_projection_mode`` receipt field.
     ``ffn_mode="mlx-resident"`` passes ``MLXC_USE_DEVICE_FFN=1`` and requires
     an explicit ``ffn_mode`` receipt field. All opt-in modes fail closed
     against an older binary that silently ignores the request.
@@ -355,10 +363,24 @@ def generate_mlxcelerator_llama_text(
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-attention-mode-invalid"
         )
+    if (
+        not isinstance(attention_projection_mode, str)
+        or attention_projection_mode not in _LLAMA_ATTENTION_PROJECTION_MODES
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-attention-projection-mode-invalid"
+        )
     if not isinstance(rope_mode, str) or rope_mode not in _LLAMA_ROPE_MODES:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-rope-mode-invalid")
     if not isinstance(ffn_mode, str) or ffn_mode not in _LLAMA_FFN_MODES:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-ffn-mode-invalid")
+    if (
+        attention_projection_mode == "mlx-resident-query-sdpa-v1"
+        and (attention_mode != "sdpa" or rope_mode != "mlx-fast")
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-attention-projection-mode-requires-sdpa-rope"
+        )
     if (
         isinstance(max_new_tokens, bool)
         or not isinstance(max_new_tokens, int)
@@ -440,10 +462,12 @@ def generate_mlxcelerator_llama_text(
             "LC_ALL": "C",
         }
         if attention_mode == "sdpa":
-            # This is opt-in because the current decoder still stages KV on
-            # the host. The receipt parser below requires explicit mode
-            # evidence from the runtime before admitting the result.
+            # Both attention paths are opt-in. The receipt parser below
+            # requires explicit mode evidence from the runtime before
+            # admitting the result.
             runtime_env["MLXC_USE_SDPA"] = "1"
+        if attention_projection_mode == "mlx-resident-query-sdpa-v1":
+            runtime_env["MLXC_USE_SDPA_RESIDENT"] = "1"
         if rope_mode == "mlx-fast":
             runtime_env["MLXC_USE_ROPE"] = "1"
         if ffn_mode == "mlx-resident":
@@ -503,6 +527,7 @@ def generate_mlxcelerator_llama_text(
         prompt,
         max_new_tokens,
         attention_mode,
+        attention_projection_mode,
         rope_mode,
         ffn_mode,
     )
@@ -960,6 +985,7 @@ def _parse_llama_generation_output(
     prompt: str,
     max_new_tokens: int,
     attention_mode: str = "host",
+    attention_projection_mode: str = "host",
     rope_mode: str = "host",
     ffn_mode: str = "host",
 ) -> dict[str, Any]:
@@ -972,6 +998,8 @@ def _parse_llama_generation_output(
     required_keys = set(_LLAMA_GENERATION_REQUIRED_KEYS)
     if attention_mode == "sdpa":
         required_keys.add("attention_mode")
+    if attention_projection_mode == "mlx-resident-query-sdpa-v1":
+        required_keys.add("attention_projection_mode")
     if rope_mode == "mlx-fast":
         required_keys.add("rope_mode")
     if ffn_mode == "mlx-resident":
@@ -996,6 +1024,13 @@ def _parse_llama_generation_output(
     if attention_mode == "sdpa" and value["attention_mode"] != "sdpa":
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-attention-mode-mismatch"
+        )
+    if (
+        attention_projection_mode == "mlx-resident-query-sdpa-v1"
+        and value["attention_projection_mode"] != "mlx-resident-query-sdpa-v1"
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-attention-projection-mode-mismatch"
         )
     if rope_mode == "mlx-fast" and value["rope_mode"] != "mlx-fast":
         raise MlxceleratorRuntimeError(
@@ -1042,6 +1077,8 @@ def _parse_llama_generation_output(
     }
     if attention_mode == "sdpa":
         generation["attention_mode"] = value["attention_mode"]
+    if attention_projection_mode == "mlx-resident-query-sdpa-v1":
+        generation["attention_projection_mode"] = value["attention_projection_mode"]
     if rope_mode == "mlx-fast":
         generation["rope_mode"] = value["rope_mode"]
     if ffn_mode == "mlx-resident":

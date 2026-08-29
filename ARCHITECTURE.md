@@ -185,13 +185,18 @@ The M5 qualification command checks platform, immutable model identity, model lo
 
 The Graph integration exposes the native MLX Llama generator through an
 authenticated receipt. Attention and rotary acceleration remain explicit
-options, and `ffn_mode` accepts `host` (the default) or `mlx-resident`. The
-resident option passes `MLXC_USE_DEVICE_FFN=1` only for that request and
-requires the runtime JSON to return `ffn_mode=mlx-resident`; an older binary
-that ignores the request is rejected. The receipt still records the exact
-executable, model, MLX-C library, native closure, prompt, token budget, and
-generated text. Device FFN currently copies its result back before the host
-residual, so this contract does not claim a fully device-resident decoder.
+options. `attention_projection_mode` accepts `host` (the default) or
+`mlx-resident-query-sdpa-v1`, and the resident option is valid only with
+`attention_mode=sdpa` and `rope_mode=mlx-fast`. It passes
+`MLXC_USE_SDPA_RESIDENT=1` only for that exact combination and requires the
+runtime JSON to return the same versioned `attention_projection_mode`; an older
+binary that ignores the request is rejected. `ffn_mode` accepts `host` (the
+default) or `mlx-resident`. The resident FFN option passes
+`MLXC_USE_DEVICE_FFN=1` only for that request and requires the runtime JSON to
+return `ffn_mode=mlx-resident`. The receipt still records the exact executable,
+model, MLX-C library, native closure, prompt, token budget, and generated text.
+Resident attention and FFN paths retain explicit host copy boundaries, so this
+contract does not claim a fully device-resident decoder.
 
 An exposed `mtp_forward` method is treated as capability only. The direct v0.5.3 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
 
