@@ -94,6 +94,7 @@ _LLAMA_ATTENTION_PROJECTION_MODES = frozenset(
 _LLAMA_ROPE_MODES = frozenset({"host", "mlx-fast"})
 _LLAMA_FFN_MODES = frozenset({"host", "mlx-resident"})
 _LLAMA_HIDDEN_STATE_MODES = frozenset({"host", "mlx-resident-hidden-v1"})
+_LLAMA_QUANTIZATION_MODES = frozenset({"host", "mlx-affine-q4-v1"})
 
 
 class MlxceleratorRuntimeError(RuntimeError):
@@ -337,6 +338,7 @@ def generate_mlxcelerator_llama_text(
     rope_mode: str = "host",
     ffn_mode: str = "host",
     hidden_state_mode: str = "host",
+    quantization_mode: str = "host",
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Authenticate and run the native MLX Llama generation command.
@@ -358,6 +360,10 @@ def generate_mlxcelerator_llama_text(
     hidden-state mode requires resident attention projection and resident FFN;
     it also enables the resident residual path and requires an exact
     ``hidden_state_mode`` receipt field.
+    ``quantization_mode="mlx-affine-q4-v1"`` passes ``MLXC_USE_QUANTIZED=1``
+    and requires the exact quantization receipt field. The mode is an explicit
+    MLX affine representation, not a claim that GGUF block formats are
+    losslessly interchangeable with it.
     """
 
     _validate_timeout(timeout_seconds)
@@ -385,6 +391,13 @@ def generate_mlxcelerator_llama_text(
     ):
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-hidden-state-mode-invalid"
+        )
+    if (
+        not isinstance(quantization_mode, str)
+        or quantization_mode not in _LLAMA_QUANTIZATION_MODES
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-quantization-mode-invalid"
         )
     if (
         attention_projection_mode == "mlx-resident-query-sdpa-v1"
@@ -493,6 +506,8 @@ def generate_mlxcelerator_llama_text(
             runtime_env["MLXC_USE_DEVICE_FFN"] = "1"
         if hidden_state_mode == "mlx-resident-hidden-v1":
             runtime_env["MLXC_USE_DEVICE_RESIDUAL"] = "1"
+        if quantization_mode == "mlx-affine-q4-v1":
+            runtime_env["MLXC_USE_QUANTIZED"] = "1"
         returncode, stdout, stderr = _run_probe_bounded(
             [
                 str(snapshot_executable),
@@ -552,6 +567,7 @@ def generate_mlxcelerator_llama_text(
         rope_mode,
         ffn_mode,
         hidden_state_mode,
+        quantization_mode,
     )
     executable_after = regular_file_identity(executable_path)
     model_after = _model_file_identity(model_path)
@@ -1011,6 +1027,7 @@ def _parse_llama_generation_output(
     rope_mode: str = "host",
     ffn_mode: str = "host",
     hidden_state_mode: str = "host",
+    quantization_mode: str = "host",
 ) -> dict[str, Any]:
     try:
         value = json.loads(output)
@@ -1029,6 +1046,8 @@ def _parse_llama_generation_output(
         required_keys.add("ffn_mode")
     if hidden_state_mode == "mlx-resident-hidden-v1":
         required_keys.add("hidden_state_mode")
+    if quantization_mode == "mlx-affine-q4-v1":
+        required_keys.add("quantization_mode")
     if not isinstance(value, dict) or set(value) != required_keys:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-schema-invalid")
     if (
@@ -1071,6 +1090,13 @@ def _parse_llama_generation_output(
     ):
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-hidden-state-mode-mismatch"
+        )
+    if (
+        quantization_mode == "mlx-affine-q4-v1"
+        and value["quantization_mode"] != "mlx-affine-q4-v1"
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-quantization-mode-mismatch"
         )
     if not isinstance(value["path"], str) or not value["path"]:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-path-invalid")
@@ -1117,6 +1143,8 @@ def _parse_llama_generation_output(
         generation["ffn_mode"] = value["ffn_mode"]
     if hidden_state_mode == "mlx-resident-hidden-v1":
         generation["hidden_state_mode"] = value["hidden_state_mode"]
+    if quantization_mode == "mlx-affine-q4-v1":
+        generation["quantization_mode"] = value["quantization_mode"]
     return generation
 
 

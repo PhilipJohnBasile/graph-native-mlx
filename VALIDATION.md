@@ -63,6 +63,10 @@
   `MLXC_USE_DEVICE_RESIDUAL=1` only with resident attention and FFN, and rejects
   missing, mismatched, or prerequisite-free hidden-state requests; host hidden
   state remains the default
+- Graph's native MLX generation bridge validates
+  `quantization_mode=mlx-affine-q4-v1`, passes `MLXC_USE_QUANTIZED=1` only for
+  the opt-in path, and rejects missing or mismatched quantization evidence; host
+  F32 weights remain the default
 
 ## v0.5.6 qualification checks
 

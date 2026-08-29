@@ -201,6 +201,11 @@ attention projection and resident FFN, passes `MLXC_USE_DEVICE_RESIDUAL=1`, and
 requires the runtime JSON to return the same versioned mode. This authenticates
 the current hidden-state residency path while keeping the contract explicit
 that it is not yet a fully fused decoder.
+`quantization_mode` accepts `host` (the default) or `mlx-affine-q4-v1`. The
+native option passes `MLXC_USE_QUANTIZED=1` and requires the runtime JSON to
+return the exact versioned mode. It authenticates MLX affine 4-bit weight
+conversion and execution; it does not treat that representation as lossless
+GGUF block-format equivalence.
 
 An exposed `mtp_forward` method is treated as capability only. The direct v0.5.3 provider uses ordinary `mlx_lm.stream_generate` and reports MTP activation separately.
 
