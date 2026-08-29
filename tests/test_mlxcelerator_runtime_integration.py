@@ -174,6 +174,23 @@ def _ffn_llama_script(tmp_path: Path, output: str) -> Path:
     return executable
 
 
+def _resident_hidden_llama_script(tmp_path: Path, output: str) -> Path:
+    executable = tmp_path / "mlxcelerator"
+    escaped = output.replace("'", "'\"'\"'")
+    executable.write_text(
+        f"#!/bin/sh\n"
+        f"if [ \"$MLXC_USE_SDPA\" != \"1\" ]; then exit 98; fi\n"
+        f"if [ \"$MLXC_USE_ROPE\" != \"1\" ]; then exit 99; fi\n"
+        f"if [ \"$MLXC_USE_SDPA_RESIDENT\" != \"1\" ]; then exit 100; fi\n"
+        f"if [ \"$MLXC_USE_DEVICE_FFN\" != \"1\" ]; then exit 101; fi\n"
+        f"if [ \"$MLXC_USE_DEVICE_RESIDUAL\" != \"1\" ]; then exit 102; fi\n"
+        f"printf '%s' '{escaped}'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
 def test_llama_admission_authenticates_model_and_configuration(
     tmp_path: Path,
 ) -> None:
@@ -438,6 +455,93 @@ def test_llama_generation_resident_attention_requires_sdpa_rope_and_receipt(
         == "mlx-resident-query-sdpa-v1"
     )
     assert receipt["generation"]["rope_mode"] == "mlx-fast"
+
+
+def test_llama_generation_resident_hidden_state_requires_primitives_and_receipt(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    model_identity = regular_file_identity(model)
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    output = json.dumps(
+        {
+            "schema_version": 1,
+            "backend": "mlx-gpu-linear-sdpa-host-kv-v1",
+            "attention_mode": "sdpa",
+            "attention_projection_mode": "mlx-resident-query-sdpa-v1",
+            "hidden_state_mode": "mlx-resident-hidden-v1",
+            "rope_mode": "mlx-fast",
+            "ffn_mode": "mlx-resident",
+            "path": "/snapshot/model.gguf",
+            "file_size": model_identity["bytes"],
+            "digest_sha256": model_identity["sha256"],
+            "prompt": "hello",
+            "max_new_tokens": 2,
+            "generated_text": "ok",
+        },
+        separators=(",", ":"),
+    )
+    executable = _resident_hidden_llama_script(tmp_path, output)
+
+    receipt = generate_mlxcelerator_llama_text(
+        executable,
+        model,
+        library,
+        "hello",
+        2,
+        expected_executable_sha256=regular_file_identity(executable)["sha256"],
+        expected_model_sha256=model_identity["sha256"],
+        expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+        expected_library_manifest_sha256=tree_manifest(
+            library.parent,
+            reject_symlinks=True,
+            require_root_owned=False,
+        )["manifest_sha256"],
+        attention_mode="sdpa",
+        attention_projection_mode="mlx-resident-query-sdpa-v1",
+        rope_mode="mlx-fast",
+        ffn_mode="mlx-resident",
+        hidden_state_mode="mlx-resident-hidden-v1",
+    )
+
+    assert receipt["generation"]["hidden_state_mode"] == "mlx-resident-hidden-v1"
+
+
+def test_llama_generation_resident_hidden_state_rejects_missing_prerequisite(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"validated llama fixture")
+    library_root = tmp_path / "mlx"
+    library_root.mkdir()
+    library = library_root / "libmlxc.dylib"
+    library.write_bytes(b"test mlx-c")
+    executable = _llama_script(tmp_path, "{}")
+
+    with pytest.raises(
+        MlxceleratorRuntimeError,
+        match="mlxcelerator-llama-generation-hidden-state-mode-requires-resident-primitives",
+    ):
+        generate_mlxcelerator_llama_text(
+            executable,
+            model,
+            library,
+            "hello",
+            2,
+            expected_executable_sha256=regular_file_identity(executable)["sha256"],
+            expected_model_sha256=regular_file_identity(model)["sha256"],
+            expected_mlx_c_sha256=regular_file_identity(library)["sha256"],
+            expected_library_manifest_sha256=tree_manifest(
+                library.parent,
+                reject_symlinks=True,
+                require_root_owned=False,
+            )["manifest_sha256"],
+            hidden_state_mode="mlx-resident-hidden-v1",
+        )
 
 
 def test_llama_generation_resident_attention_rejects_missing_receipt(

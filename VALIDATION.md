@@ -58,6 +58,11 @@
   `MLXC_USE_SDPA_RESIDENT=1` only when SDPA and native RoPE are both selected,
   and rejects missing or mismatched receipt evidence; host projection remains
   the default
+- Graph's native MLX generation bridge validates
+  `hidden_state_mode=mlx-resident-hidden-v1`, passes
+  `MLXC_USE_DEVICE_RESIDUAL=1` only with resident attention and FFN, and rejects
+  missing, mismatched, or prerequisite-free hidden-state requests; host hidden
+  state remains the default
 
 ## v0.5.6 qualification checks
 

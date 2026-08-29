@@ -93,6 +93,7 @@ _LLAMA_ATTENTION_PROJECTION_MODES = frozenset(
 )
 _LLAMA_ROPE_MODES = frozenset({"host", "mlx-fast"})
 _LLAMA_FFN_MODES = frozenset({"host", "mlx-resident"})
+_LLAMA_HIDDEN_STATE_MODES = frozenset({"host", "mlx-resident-hidden-v1"})
 
 
 class MlxceleratorRuntimeError(RuntimeError):
@@ -335,6 +336,7 @@ def generate_mlxcelerator_llama_text(
     attention_projection_mode: str = "host",
     rope_mode: str = "host",
     ffn_mode: str = "host",
+    hidden_state_mode: str = "host",
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Authenticate and run the native MLX Llama generation command.
@@ -352,7 +354,10 @@ def generate_mlxcelerator_llama_text(
     exact versioned ``attention_projection_mode`` receipt field.
     ``ffn_mode="mlx-resident"`` passes ``MLXC_USE_DEVICE_FFN=1`` and requires
     an explicit ``ffn_mode`` receipt field. All opt-in modes fail closed
-    against an older binary that silently ignores the request.
+    against an older binary that silently ignores the request. The resident
+    hidden-state mode requires resident attention projection and resident FFN;
+    it also enables the resident residual path and requires an exact
+    ``hidden_state_mode`` receipt field.
     """
 
     _validate_timeout(timeout_seconds)
@@ -375,11 +380,25 @@ def generate_mlxcelerator_llama_text(
     if not isinstance(ffn_mode, str) or ffn_mode not in _LLAMA_FFN_MODES:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-ffn-mode-invalid")
     if (
+        not isinstance(hidden_state_mode, str)
+        or hidden_state_mode not in _LLAMA_HIDDEN_STATE_MODES
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-hidden-state-mode-invalid"
+        )
+    if (
         attention_projection_mode == "mlx-resident-query-sdpa-v1"
         and (attention_mode != "sdpa" or rope_mode != "mlx-fast")
     ):
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-attention-projection-mode-requires-sdpa-rope"
+        )
+    if hidden_state_mode == "mlx-resident-hidden-v1" and (
+        attention_projection_mode != "mlx-resident-query-sdpa-v1"
+        or ffn_mode != "mlx-resident"
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-hidden-state-mode-requires-resident-primitives"
         )
     if (
         isinstance(max_new_tokens, bool)
@@ -472,6 +491,8 @@ def generate_mlxcelerator_llama_text(
             runtime_env["MLXC_USE_ROPE"] = "1"
         if ffn_mode == "mlx-resident":
             runtime_env["MLXC_USE_DEVICE_FFN"] = "1"
+        if hidden_state_mode == "mlx-resident-hidden-v1":
+            runtime_env["MLXC_USE_DEVICE_RESIDUAL"] = "1"
         returncode, stdout, stderr = _run_probe_bounded(
             [
                 str(snapshot_executable),
@@ -530,6 +551,7 @@ def generate_mlxcelerator_llama_text(
         attention_projection_mode,
         rope_mode,
         ffn_mode,
+        hidden_state_mode,
     )
     executable_after = regular_file_identity(executable_path)
     model_after = _model_file_identity(model_path)
@@ -988,6 +1010,7 @@ def _parse_llama_generation_output(
     attention_projection_mode: str = "host",
     rope_mode: str = "host",
     ffn_mode: str = "host",
+    hidden_state_mode: str = "host",
 ) -> dict[str, Any]:
     try:
         value = json.loads(output)
@@ -1004,6 +1027,8 @@ def _parse_llama_generation_output(
         required_keys.add("rope_mode")
     if ffn_mode == "mlx-resident":
         required_keys.add("ffn_mode")
+    if hidden_state_mode == "mlx-resident-hidden-v1":
+        required_keys.add("hidden_state_mode")
     if not isinstance(value, dict) or set(value) != required_keys:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-schema-invalid")
     if (
@@ -1039,6 +1064,13 @@ def _parse_llama_generation_output(
     if ffn_mode == "mlx-resident" and value["ffn_mode"] != "mlx-resident":
         raise MlxceleratorRuntimeError(
             "mlxcelerator-llama-generation-ffn-mode-mismatch"
+        )
+    if (
+        hidden_state_mode == "mlx-resident-hidden-v1"
+        and value["hidden_state_mode"] != "mlx-resident-hidden-v1"
+    ):
+        raise MlxceleratorRuntimeError(
+            "mlxcelerator-llama-generation-hidden-state-mode-mismatch"
         )
     if not isinstance(value["path"], str) or not value["path"]:
         raise MlxceleratorRuntimeError("mlxcelerator-llama-generation-path-invalid")
@@ -1083,6 +1115,8 @@ def _parse_llama_generation_output(
         generation["rope_mode"] = value["rope_mode"]
     if ffn_mode == "mlx-resident":
         generation["ffn_mode"] = value["ffn_mode"]
+    if hidden_state_mode == "mlx-resident-hidden-v1":
+        generation["hidden_state_mode"] = value["hidden_state_mode"]
     return generation
 
 
